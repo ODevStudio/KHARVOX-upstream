@@ -15,6 +15,7 @@
 // when renderdoc.dll is not in the process. See rdc_api() below.
 #include "kharvoxnative/renderdoc_app.h"
 #include <Windows.h>
+#include "../../../../common/GameMemory.h"
 #include <MinHook.h>
 #include <vulkan/vulkan.h>
 #include <atomic>

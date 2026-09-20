@@ -1,3 +1,5 @@
+#include "../common/GameMemory.h"
+#include "../common/GameImports.h"
 #include "../common/RuntimeLog.h"
 #include "../common/VulkanSfs.h"
 #include "../sfs/NativeSfs.h"
@@ -437,19 +439,13 @@ constexpr uintptr_t participantContinueRva=0x3BED86;
 bool reenableDoomAdaptiveRuntimeState(unsigned char* image){
     if(!image)return false;
     using namespace doomAdaptiveTick;
-    auto state=*reinterpret_cast<unsigned char* volatile*>(
-        image+adaptiveRuntimeStatePointerRva);
-    if(!state)return false;
-    MEMORY_BASIC_INFORMATION memory{};
-    if(!VirtualQuery(state+adaptiveRuntimeEnabledOffset,&memory,sizeof(memory))
-        ||memory.State!=MEM_COMMIT||(memory.Protect&PAGE_NOACCESS)
-        ||(memory.Protect&PAGE_GUARD))return false;
-    auto enabled=reinterpret_cast<volatile char*>(
-        state+adaptiveRuntimeEnabledOffset);
-    const char previous=_InterlockedCompareExchange8(enabled,0,0);
-    if(previous!=0&&previous!=1)return false;
-    _InterlockedExchange8(enabled,1);
-    if(previous==0){
+    uintptr_t state{};
+    if(!kharvox::gameMemory::copy(image+adaptiveRuntimeStatePointerRva,&state,sizeof(state))
+        ||!state||state>UINTPTR_MAX-adaptiveRuntimeEnabledOffset)return false;
+    bool changed{};
+    if(!kharvox::gameMemory::enableBooleanByte(
+        reinterpret_cast<void*>(state+adaptiveRuntimeEnabledOffset),changed))return false;
+    if(changed){
         static std::atomic<bool> repairedLogged{};
         if(!repairedLogged.exchange(true,std::memory_order_acq_rel))
             log("[CINEMATIC-HZ] stale participant block cleared from native adaptive runtime state");
@@ -467,7 +463,7 @@ bool installImmersiveAdaptiveParticipantBypass(unsigned char* image){
     constexpr unsigned char signature[]{
         0x85,0xC9,0x0F,0x8F,0xB4,0x00,0x00,0x00,
         0x80,0xBF,0x90,0xD4,0x49,0x00,0x00};
-    if(std::memcmp(target,signature,sizeof(signature))!=0){
+    if(kharvox::gameMemory::compareImage(target,signature,sizeof(signature))!=0){
         log("[CINEMATIC-HZ] adaptive-participant branch signature mismatch; bypass disabled safely");
         return false;
     }
@@ -540,15 +536,11 @@ bool installImmersiveAdaptiveParticipantBypass(unsigned char* image){
 }
 bool validateDoomAdaptiveTickLayout(unsigned char* image){
     if(!image)return false;
-    const auto dos=reinterpret_cast<const IMAGE_DOS_HEADER*>(image);
-    if(dos->e_magic!=IMAGE_DOS_SIGNATURE)return false;
-    const auto nt=reinterpret_cast<const IMAGE_NT_HEADERS64*>(image+dos->e_lfanew);
-    if(nt->Signature!=IMAGE_NT_SIGNATURE)return false;
-    const auto imageSize=static_cast<uintptr_t>(nt->OptionalHeader.SizeOfImage);
+    const auto imageSize=kharvox::gameMemory::mainImage().size;
     auto matches=[&](uintptr_t rva,const char* expected){
         const size_t length=std::strlen(expected)+1;
         return rva<imageSize&&length<=imageSize-rva
-            &&std::memcmp(image+rva,expected,length)==0;
+            &&kharvox::gameMemory::compareImage(image+rva,expected,length)==0;
     };
     using namespace doomAdaptiveTick;
     return matches(adaptiveTickNameRva,"com_adaptiveTick")
@@ -557,19 +549,19 @@ bool validateDoomAdaptiveTickLayout(unsigned char* image){
         &&matches(immediateModeNameRva,"com_adaptiveTickImmediateMode")
         &&matches(syncNoAdaptiveTickNameRva,"sync_noAdaptiveTick")
         &&matches(fixedTicNameRva,"com_fixedTic")
+        &&kharvox::gameMemory::imageRange(image+adaptiveTickCurrentRva,sizeof(LONG),true)
+        &&kharvox::gameMemory::imageRange(image+minHzCurrentRva,sizeof(LONG),true)
+        &&kharvox::gameMemory::imageRange(image+maxHzCurrentRva,sizeof(LONG),true)
+        &&kharvox::gameMemory::imageRange(image+immediateModeCurrentRva,sizeof(LONG),true)
+        &&kharvox::gameMemory::imageRange(image+fixedTicCurrentRva,sizeof(LONG),true)
+        &&kharvox::gameMemory::imageRange(image+syncNoAdaptiveTickCurrentRva,sizeof(LONG),true)
+        &&kharvox::gameMemory::imageRange(image+adaptiveRuntimeStatePointerRva,sizeof(void*))
         &&adaptiveRuntimeStatePointerRva+sizeof(void*)<=imageSize
         &&syncNoAdaptiveTickCurrentRva+sizeof(LONG)<=imageSize;
 }
 bool ensureImmersiveAdaptiveTickSupport(){
     auto& hold=s.cinematicAdaptiveTick;
-    if(hold.layoutChecked)return hold.layoutAvailable;
-    hold.layoutChecked=true;
-    auto image=reinterpret_cast<unsigned char*>(GetModuleHandleW(nullptr));
-    hold.layoutAvailable=validateDoomAdaptiveTickLayout(image)
-        &&installImmersiveAdaptiveParticipantBypass(image);
-    if(!hold.layoutAvailable)
-        log("[CINEMATIC-HZ] DOOM 6.66 adaptive-tick layout mismatch; refresh hold disabled safely");
-    return hold.layoutAvailable;
+    return hold.layoutChecked&&hold.layoutAvailable;
 }
 bool consumeNativeAdaptiveParticipantObservation(){
     if(!ensureImmersiveAdaptiveTickSupport())return false;
@@ -690,48 +682,35 @@ DWORD WINAPI kharvoxXInputSetState(DWORD userIndex,XINPUT_VIBRATION* vibration){
     return originalResult==ERROR_DEVICE_NOT_CONNECTED?ERROR_SUCCESS:originalResult;
 }
 bool installXInputHook(){
+    static std::mutex installationMutex;
+    std::lock_guard installationLock(installationMutex);
     KharvoxBhapticsIpcStart();
     KharvoxPsvr2IpcStart();
     if(xinputHookReady&&xinputSetStateHookReady)return true;
-    auto module=reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr));
-    if(!module)return false;
-    auto dos=reinterpret_cast<IMAGE_DOS_HEADER*>(module);
-    if(dos->e_magic!=IMAGE_DOS_SIGNATURE)return false;
-    auto nt=reinterpret_cast<IMAGE_NT_HEADERS64*>(module+dos->e_lfanew);
-    if(nt->Signature!=IMAGE_NT_SIGNATURE)return false;
-    const auto directory=nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
-    if(!directory.VirtualAddress)return false;
-    auto patchImport=[](IMAGE_THUNK_DATA64*address,ULONGLONG replacement){
-        if(address->u1.Function==replacement)return true;
+    const auto& image=kharvox::gameMemory::mainImage();
+    auto patchImport=[&](kharvox::gameMemory::ImportSlot imported,void* replacement){
+        if(!image.base||!imported.rva)return false;
+        auto slot=const_cast<unsigned char*>(image.base)+imported.rva;
+        if(!imported.rva||!kharvox::gameMemory::imageRange(slot,sizeof(void*)))return false;
         DWORD oldProtect{};
-        if(!VirtualProtect(&address->u1.Function,sizeof(address->u1.Function),PAGE_READWRITE,&oldProtect))return false;
-        address->u1.Function=replacement;
+        if(!VirtualProtect(slot,sizeof(void*),PAGE_READWRITE,&oldProtect))return false;
+        const bool replaced=InterlockedCompareExchangePointer(reinterpret_cast<void* volatile*>(slot),
+            replacement,reinterpret_cast<void*>(imported.function))==reinterpret_cast<void*>(imported.function);
         DWORD ignored{};
-        VirtualProtect(&address->u1.Function,sizeof(address->u1.Function),oldProtect,&ignored);
-        FlushInstructionCache(GetCurrentProcess(),&address->u1.Function,sizeof(address->u1.Function));
-        return true;
+        if(!VirtualProtect(slot,sizeof(void*),oldProtect,&ignored))log("[INPUT] XInput IAT protection restore failed");
+        return replaced;
     };
-    for(auto descriptor=reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(module+directory.VirtualAddress);descriptor->Name;descriptor++){
-        const char*library=reinterpret_cast<const char*>(module+descriptor->Name);
-        if(_stricmp(library,"XINPUT1_4.dll"))continue;
-        auto names=reinterpret_cast<IMAGE_THUNK_DATA64*>(module+(descriptor->OriginalFirstThunk?descriptor->OriginalFirstThunk:descriptor->FirstThunk));
-        auto addresses=reinterpret_cast<IMAGE_THUNK_DATA64*>(module+descriptor->FirstThunk);
-        for(;names->u1.AddressOfData;names++,addresses++){
-            if(!IMAGE_SNAP_BY_ORDINAL64(names->u1.Ordinal))continue;
-            const auto ordinal=IMAGE_ORDINAL64(names->u1.Ordinal);
-            if(ordinal==2&&!xinputHookReady){
-                originalXInputGetState=reinterpret_cast<XInputGetStateFn>(addresses->u1.Function);
-                if(patchImport(addresses,reinterpret_cast<ULONGLONG>(kharvoxXInputGetState))){
-                    xinputHookReady=true;
-                }else originalXInputGetState=nullptr;
-            }else if(ordinal==3&&!xinputSetStateHookReady){
-                originalXInputSetState=reinterpret_cast<XInputSetStateFn>(addresses->u1.Function);
-                if(patchImport(addresses,reinterpret_cast<ULONGLONG>(kharvoxXInputSetState))){
-                    xinputSetStateHookReady=true;
-                }else originalXInputSetState=nullptr;
-            }
-        }
-        break;
+    if(!xinputHookReady){
+        const auto imported=kharvox::gameMemory::ordinalImport(image,"XINPUT1_4.dll",2);
+        originalXInputGetState=reinterpret_cast<XInputGetStateFn>(imported.function);
+        xinputHookReady=patchImport(imported,reinterpret_cast<void*>(kharvoxXInputGetState));
+        if(!xinputHookReady)originalXInputGetState=nullptr;
+    }
+    if(!xinputSetStateHookReady){
+        const auto imported=kharvox::gameMemory::ordinalImport(image,"XINPUT1_4.dll",3);
+        originalXInputSetState=reinterpret_cast<XInputSetStateFn>(imported.function);
+        xinputSetStateHookReady=patchImport(imported,reinterpret_cast<void*>(kharvoxXInputSetState));
+        if(!xinputSetStateHookReady)originalXInputSetState=nullptr;
     }
     if(xinputHookReady)log("[INPUT] XInputGetState IAT hook installed; analog OpenXR gamepad active");
     else log("[INPUT] XInputGetState IAT hook unavailable; keyboard movement fallback active");
@@ -1407,7 +1386,15 @@ float nativeManualTurnX(XrTime displayTime,bool active){
     const float nativeMagnitude=nativeDoomRightStickDeadzone+desiredMagnitude*(1.f-nativeDoomRightStickDeadzone);
     return std::copysign(nativeMagnitude,stickDirection);
 }
-float* doomFloat(uintptr_t rva){auto base=reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr));return base?reinterpret_cast<float*>(base+rva):nullptr;}
+template<class T> void writeDoomValue(uintptr_t rva,T value){
+    static_assert(sizeof(T)==sizeof(LONG));
+    const auto& image=kharvox::gameMemory::mainImage();
+    if(!kharvox::gameMemory::supportedDoomImage()||rva>=image.size||rva%alignof(LONG))return;
+    auto address=const_cast<unsigned char*>(image.base)+rva;
+    if(!kharvox::gameMemory::imageRange(address,sizeof(LONG),true))return;
+    LONG bits{};std::memcpy(&bits,&value,sizeof(bits));
+    InterlockedExchange(reinterpret_cast<volatile LONG*>(address),bits);
+}
 constexpr uintptr_t joyYawSpeedCurrentRva=0x5FAA3A4;
 constexpr uintptr_t joyDeadZoneCurrentRva=0x5FAA124;
 constexpr uintptr_t joyDampenLookCurrentRva=0x5FAA580;
@@ -1416,12 +1403,12 @@ constexpr uintptr_t joySmoothingEnabledCurrentRva=0x5FAA800;
 constexpr uintptr_t joyEdgeAccelerationScalarCurrentRva=0x5FAAA84;
 constexpr float bodyFollowYawSpeed=600.f;
 void holdNativeTurnCvars(float degreesPerSecond){
-    if(float* value=doomFloat(joyYawSpeedCurrentRva))*value=degreesPerSecond;
-    if(float* value=doomFloat(joyDeadZoneCurrentRva))*value=nativeDoomRightStickDeadzone;
-    if(int* value=reinterpret_cast<int*>(doomFloat(joyDampenLookCurrentRva)))*value=0;
-    if(int* value=reinterpret_cast<int*>(doomFloat(joyGammaLookCurrentRva)))*value=0;
-    if(int* value=reinterpret_cast<int*>(doomFloat(joySmoothingEnabledCurrentRva)))*value=0;
-    if(float* value=doomFloat(joyEdgeAccelerationScalarCurrentRva))*value=0.f;
+    writeDoomValue(joyYawSpeedCurrentRva,degreesPerSecond);
+    writeDoomValue(joyDeadZoneCurrentRva,nativeDoomRightStickDeadzone);
+    writeDoomValue(joyDampenLookCurrentRva,0);
+    writeDoomValue(joyGammaLookCurrentRva,0);
+    writeDoomValue(joySmoothingEnabledCurrentRva,0);
+    writeDoomValue(joyEdgeAccelerationScalarCurrentRva,0.f);
 }
 float nativePhysicalBodyTurnX(bool gameplay,bool manualTurnActive){
     if(!gameplay||manualTurnActive||!s.head.valid||s.postCinematicYawGuard.active){s.bodyFollowTurnX=0.f;return 0.f;}
@@ -1823,21 +1810,21 @@ void locateGameplayControllerPoses(XrTime displayTime){
     locateController(s.leftGripPose,s.leftGripSpace,s.leftGripController);
 }
 void setWeaponCvars(float x,float y,float z,float pitch,float yaw,float roll){
-    *reinterpret_cast<int*>(doomFloat(0x5B64540))=0;
+    writeDoomValue(0x5B64540,0);
     // r132's launch argument was overwritten here on every 6DoF update.
     // Keep identity depth while custom hands share the DOOM depth buffer;
     // preserve the accepted guns-only zero-depth behavior when disabled.
-    *doomFloat(0x5BA9C44)=kharvox::hands::nativeWeaponDepthScale(s.showHands);
-    *doomFloat(0x5BAAAA4)=1.f;
-    *doomFloat(0x726C384)=1.f;
-    *reinterpret_cast<int*>(doomFloat(0x5BAA3C0))=1;
-    *reinterpret_cast<int*>(doomFloat(0x5BAA460))=1;
-    *reinterpret_cast<int*>(doomFloat(0x5BAA5A0))=1;
-    *reinterpret_cast<int*>(doomFloat(0x5BAA640))=1;
-    *reinterpret_cast<int*>(doomFloat(0x5BAFAF0))=0;
-    *reinterpret_cast<int*>(doomFloat(0x5BAE5F0))=0;
-    *doomFloat(0x5BAA6E4)=x;*doomFloat(0x5BAA784)=y;*doomFloat(0x5BAA824)=z;
-    *doomFloat(0x5BAA8C4)=pitch;*doomFloat(0x5BAA964)=yaw;*doomFloat(0x5BAAA04)=roll;
+    writeDoomValue(0x5BA9C44,kharvox::hands::nativeWeaponDepthScale(s.showHands));
+    writeDoomValue(0x5BAAAA4,1.f);
+    writeDoomValue(0x726C384,1.f);
+    writeDoomValue(0x5BAA3C0,1);
+    writeDoomValue(0x5BAA460,1);
+    writeDoomValue(0x5BAA5A0,1);
+    writeDoomValue(0x5BAA640,1);
+    writeDoomValue(0x5BAFAF0,0);
+    writeDoomValue(0x5BAE5F0,0);
+    writeDoomValue(0x5BAA6E4,x);writeDoomValue(0x5BAA784,y);writeDoomValue(0x5BAA824,z);
+    writeDoomValue(0x5BAA8C4,pitch);writeDoomValue(0x5BAA964,yaw);writeDoomValue(0x5BAAA04,roll);
 }
 bool supportGripInCaptureRange(){
     if(!s.twoHandEnabled)return false;
@@ -1992,7 +1979,7 @@ void updateWeapon6Dof(){
 }
 void updateGameplayActions(XrTime displayTime){
     if(!s.actionsReady){s.primaryFireDown=false;return;}
-    *reinterpret_cast<int*>(doomFloat(0x5B64540))=0;
+    writeDoomValue(0x5B64540,0);
     holdNativeTurnCvars(manualTurnCarrierSpeed());
     static bool yawSpeedHoldLogged=false;
     if(!yawSpeedHoldLogged){yawSpeedHoldLogged=true;std::ostringstream o;o<<"[TURN] holding live joy_yawSpeed current-value RVA 0x"<<std::hex<<joyYawSpeedCurrentRva<<std::dec<<" at "<<manualTurnCarrierSpeed()<<" only for hidden body catch-up; visible Smooth Turn uses OpenXR frame time";log(o.str());}
@@ -3339,6 +3326,17 @@ static void initializeOpenXR(VkInstance instance){std::lock_guard<std::mutex>l(m
     log(std::string("[HAPTICS] OpenXR core function table ")+(hapticFunctions?"ready":"unavailable; continuing without VR rumble"));
     log(std::string("core function table ")+(core?"ready":"INCOMPLETE"));if(!core)return;
     bool graphics=false;if(s.enable2)graphics=load("xrGetVulkanGraphicsRequirements2KHR",s.requirements2)&&load("xrGetVulkanGraphicsDevice2KHR",s.graphicsDevice2)&&load("xrCreateVulkanInstanceKHR",s.createVulkanInstance)&&load("xrCreateVulkanDeviceKHR",s.createVulkanDevice);else graphics=load("xrGetVulkanGraphicsRequirementsKHR",s.requirements1)&&load("xrGetVulkanGraphicsDeviceKHR",s.graphicsDevice1)&&load("xrGetVulkanInstanceExtensionsKHR",s.instanceExtensions)&&load("xrGetVulkanDeviceExtensionsKHR",s.deviceExtensions);log(std::string("Vulkan XR functions ")+(graphics?"ready":"INCOMPLETE"));if(s.enable2){log("XR_KHR_vulkan_enable2 active");log(std::string("xrCreateVulkanInstanceKHR ")+(s.createVulkanInstance?"available":"MISSING"));log(std::string("xrCreateVulkanDeviceKHR ")+(s.createVulkanDevice?"available":"MISSING"));log(std::string("xrGetVulkanGraphicsDevice2KHR ")+(s.graphicsDevice2?"available":"MISSING"));}if(!graphics)return;XrSystemGetInfo gi{XR_TYPE_SYSTEM_GET_INFO};gi.formFactor=XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;log("calling xrGetSystem");r=s.getSystem(s.instance,&gi,&s.system);log("xrGetSystem result="+std::to_string(r)+" system="+std::to_string(s.system));if(XR_SUCCEEDED(r)){XrGraphicsRequirementsVulkanKHR requirements{XR_TYPE_GRAPHICS_REQUIREMENTS_VULKAN_KHR};const XrResult requirementsResult=s.enable2?s.requirements2(s.instance,s.system,&requirements):s.requirements1(s.instance,s.system,&requirements);if(XR_SUCCEEDED(requirementsResult)){s.runtimeMaxVulkanApiVersion=VK_MAKE_API_VERSION(0,XR_VERSION_MAJOR(requirements.maxApiVersionSupported),XR_VERSION_MINOR(requirements.maxApiVersionSupported),XR_VERSION_PATCH(requirements.maxApiVersionSupported));log("Runtime Vulkan API range min="+std::to_string(XR_VERSION_MAJOR(requirements.minApiVersionSupported))+"."+std::to_string(XR_VERSION_MINOR(requirements.minApiVersionSupported))+" max="+std::to_string(XR_VERSION_MAJOR(requirements.maxApiVersionSupported))+"."+std::to_string(XR_VERSION_MINOR(requirements.maxApiVersionSupported)));}else log("Runtime Vulkan requirements query failed "+result(requirementsResult));}if(!s.enable2&&XR_SUCCEEDED(r)){uint32_t size=0;s.instanceExtensions(s.instance,s.system,0,&size,nullptr);std::vector<char>b(size);s.instanceExtensions(s.instance,s.system,size,&size,b.data());log(std::string("Required instance extensions: ")+b.data());size=0;s.deviceExtensions(s.instance,s.system,0,&size,nullptr);b.assign(size,0);s.deviceExtensions(s.instance,s.system,size,&size,b.data());log(std::string("Required device extensions: ")+b.data());}}
+
+void KharvoxXRInstallGameHooks(){
+    std::lock_guard<std::mutex> lock(mutex);
+    auto& hold=s.cinematicAdaptiveTick;
+    if(hold.layoutChecked)return;
+    hold.layoutChecked=true;
+    auto image=const_cast<unsigned char*>(kharvox::gameMemory::mainImage().base);
+    hold.layoutAvailable=kharvox::gameMemory::supportedDoomImage()
+        &&validateDoomAdaptiveTickLayout(image)&&installImmersiveAdaptiveParticipantBypass(image);
+    if(!hold.layoutAvailable)log("[CINEMATIC-HZ] startup game layout unavailable; refresh hold disabled");
+}
 
 void KharvoxXRShutdownHaptics(){clearXInputHapticState();KharvoxPsvr2SubmitTrigger(kharvox::psvr2::offCommand(s.leftHanded,kharvox::psvr2::TriggerOffReason::SessionEnd));KharvoxPsvr2IpcRequestStop();KharvoxBhapticsIpcRequestStop();}
 void KharvoxXRDeviceDestroyed(){

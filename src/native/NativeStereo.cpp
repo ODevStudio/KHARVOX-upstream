@@ -1,4 +1,5 @@
 #include "../common/DiagnosticLogging.h"
+#include "../common/GameMemory.h"
 #include "../common/PoseTrace.h"
 #include "../weapon/WeaponHook.h"
 #include "../weapon/AerDrawModel.h"
@@ -174,16 +175,14 @@ static void enterPhase(Phase next){auto current=state.load();do{if(!canTransitio
 #include "NativeAerWorldProducer.inc"
 static bool installEngine(bool visualOnly=false){
  auto base=reinterpret_cast<unsigned char*>(GetModuleHandleW(L"DOOMx64vk.exe"));if(!base)return false;
- auto dos=reinterpret_cast<IMAGE_DOS_HEADER*>(base);if(dos->e_magic!=IMAGE_DOS_SIGNATURE)return false;
- auto nt=reinterpret_cast<IMAGE_NT_HEADERS64*>(base+dos->e_lfanew);
- if(nt->Signature!=IMAGE_NT_SIGNATURE||nt->FileHeader.TimeDateStamp!=1711036533||nt->OptionalHeader.SizeOfImage!=336990208)return false;
+ IMAGE_NT_HEADERS64 nt{};
+ if(!gameMemory::mainImage().headers(nt)||nt.FileHeader.TimeDateStamp!=1711036533||nt.OptionalHeader.SizeOfImage!=336990208)return false;
  // The Native-only light visibility correction uses the engine's real CVar
  // setter. Validate its entire body and unwind identity before installing
  // any hook or changing any CVar. A mismatch retains the untouched AER path.
- DWORD64 cvarImage{};auto cvarEntry=RtlLookupFunctionEntry(reinterpret_cast<DWORD64>(base+0x295780),&cvarImage,nullptr);
- if(!cvarEntry||cvarImage+cvarEntry->BeginAddress!=reinterpret_cast<DWORD64>(base+0x295780)||cvarEntry->EndAddress-cvarEntry->BeginAddress!=0x1bc||((base[cvarEntry->UnwindData]>>3)&UNW_FLAG_CHAININFO))return false;
- uint64_t cvarHash=14695981039346656037ull;for(size_t i=0;i<0x1bc;++i)cvarHash=(cvarHash^base[0x295780+i])*1099511628211ull;
- if(cvarHash!=0x25c4a7c50cfd75bcull)return false;
+ RUNTIME_FUNCTION cvarEntry{};
+ if(!gameMemory::functionEntry(base+0x295780,cvarEntry)||cvarEntry.EndAddress-cvarEntry.BeginAddress!=0x1bc
+    ||!gameMemory::hashImage(base+0x295780,0x1bc,0x25c4a7c50cfd75bcull))return false;
  struct Target {uintptr_t rva;uint64_t hash;void* hook;void** original;};
  std::vector<Target> targets;
   if(visualOnly){
@@ -204,11 +203,8 @@ static bool installEngine(bool visualOnly=false){
   targets.push_back({0x295780,0xf2a2ed770e7ab47full,reinterpret_cast<void*>(&hookFreshShadowSet),reinterpret_cast<void**>(&realFreshShadowSet)});
  }
  for(const auto& t:targets){
-  DWORD64 imageBase{};auto entry=RtlLookupFunctionEntry(reinterpret_cast<DWORD64>(base+t.rva),&imageBase,nullptr);
-  if(!entry||imageBase+entry->BeginAddress!=reinterpret_cast<DWORD64>(base+t.rva))return false;
-  if((base[entry->UnwindData]>>3)&UNW_FLAG_CHAININFO)return false;
-  uint64_t hash=14695981039346656037ull;for(int j=0;j<24;++j)hash=(hash^base[t.rva+j])*1099511628211ull;
-  if(hash!=t.hash)return false;
+  RUNTIME_FUNCTION entry{};
+  if(!gameMemory::functionEntry(base+t.rva,entry)||!gameMemory::hashImage(base+t.rva,24,t.hash))return false;
  }
  auto result=MH_Initialize();if(result!=MH_OK&&result!=MH_ERROR_ALREADY_INITIALIZED)return false;
  std::vector<void*> created;

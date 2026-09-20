@@ -31,7 +31,19 @@ int main() {
     memcpy(image+0x17e3567,kharvox::vtAppendSignature,sizeof(kharvox::vtAppendSignature));
     check(!kharvox::installVirtualTextureGuard(image,imageSize));
     memcpy(image+0x17e35d7,kharvox::vtResidencySignature,sizeof(kharvox::vtResidencySignature));
-    check(kharvox::installVirtualTextureGuard(image,imageSize));
+    check(!kharvox::installVirtualTextureGuard(image,imageSize));
+    check(memcmp(image+0x17e3567,kharvox::vtAppendSignature,sizeof(kharvox::vtAppendSignature))==0);
+    const auto code=kharvox::vtAppendThunk(reinterpret_cast<uintptr_t>(&kharvox::guardedVtAppend),
+        reinterpret_cast<uintptr_t>(image+0x17e35d7));
+    auto thunk=VirtualAlloc(nullptr,code.size(),MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE);
+    check(thunk!=nullptr);
+    memcpy(thunk,code.data(),code.size());
+    DWORD old{};
+    check(VirtualProtect(thunk,code.size(),PAGE_EXECUTE_READ,&old)!=FALSE);
+    check(FlushInstructionCache(GetCurrentProcess(),thunk,code.size())!=FALSE);
+    uint8_t jump[14]{0xff,0x25,0,0,0,0};
+    memcpy(jump+6,&thunk,sizeof(thunk));
+    memcpy(image+0x17e3567,jump,sizeof(jump));
     image[0x17e35d7]=0x5b;image[0x17e35d8]=0xc3; // synthetic continuation: pop rbx; ret
     auto object=std::make_unique<uint8_t[]>(0x20a00);
     auto dp=dst.get();auto sp=src.get();
@@ -43,5 +55,6 @@ int main() {
     reinterpret_cast<void(*)(void*)>(image)(object.get());
     check(dst->count==8192&&src->count==3719&&dst->pages[8191]==3732);
     VirtualFree(image,0,MEM_RELEASE);
+    VirtualFree(thunk,0,MEM_RELEASE);
     std::cout<<"VT overflow policy and executable thunk passed\n";
 }

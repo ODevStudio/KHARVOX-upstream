@@ -2784,24 +2784,15 @@ void emit_containment() {
 
 uintptr_t primary_function_entry(uintptr_t doom_base, uintptr_t pc, bool* was_chunk) {
     if (was_chunk) *was_chunk = false;
-    if (!doom_base || !pc) return 0;
-    DWORD64 image_base = 0;
-    PRUNTIME_FUNCTION rf = RtlLookupFunctionEntry(static_cast<DWORD64>(pc), &image_base, nullptr);
-    if (!rf || image_base != static_cast<DWORD64>(doom_base)) return 0;
-    // Bounded: a malformed or hostile chain must not spin the render thread.
-    for (int guard = 0; guard < 8; ++guard) {
-        const auto* unwind = reinterpret_cast<const uint8_t*>(doom_base + rf->UnwindData);
-        const uint8_t flags = static_cast<uint8_t>(unwind[0] >> 3);
-        constexpr uint8_t kChainInfo = 0x4;  // UNW_FLAG_CHAININFO
-        if (!(flags & kChainInfo)) return rf->BeginAddress;
-        if (was_chunk) *was_chunk = true;
-        // The chained RUNTIME_FUNCTION follows the unwind codes, which are
-        // padded to an even count. Layout is fixed by the x64 ABI.
-        const uint8_t code_count = unwind[2];
-        rf = reinterpret_cast<PRUNTIME_FUNCTION>(
-            const_cast<uint8_t*>(unwind + 4 + ((code_count + 1) & ~1) * 2));
-    }
-    return rf->BeginAddress;
+    const auto& image = kharvox::gameMemory::mainImage();
+    if (doom_base != reinterpret_cast<uintptr_t>(image.base)
+        || !kharvox::gameMemory::imageRange(reinterpret_cast<const void*>(pc), 1)) return 0;
+    DWORD64 image_base{};
+    const auto record = RtlLookupFunctionEntry(static_cast<DWORD64>(pc), &image_base, nullptr);
+    RUNTIME_FUNCTION entry{};
+    if (image_base != doom_base || !kharvox::gameMemory::imageRange(record, sizeof(entry))
+        || !kharvox::gameMemory::copy(record, &entry, sizeof(entry))) return 0;
+    return kharvox::gameMemory::primaryFunction(image, entry, was_chunk);
 }
 
 void emit_caller_specificity() {

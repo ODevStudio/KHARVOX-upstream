@@ -1,6 +1,7 @@
 #pragma once
 #include "VirtualTextureAppend.h"
 #include "VirtualTextureAppendSignature.h"
+#include "../common/GameMemory.h"
 #include <windows.h>
 #include <atomic>
 #include <cstdio>
@@ -63,8 +64,8 @@ inline std::vector<uint8_t> vtAppendThunk(uintptr_t helper, uintptr_t continuati
 inline bool installVirtualTextureGuard(uint8_t* base, uint32_t imageSize) {
     if (imageSize < 0x17e35d7 + sizeof(vtResidencySignature)) return false;
     auto target = base + 0x17e3567;
-    if (memcmp(target, vtAppendSignature, sizeof(vtAppendSignature))) return false;
-    if (memcmp(base+0x17e35d7, vtResidencySignature, sizeof(vtResidencySignature))) return false;
+    if (kharvox::gameMemory::compareImage(target, vtAppendSignature, sizeof(vtAppendSignature))) return false;
+    if (kharvox::gameMemory::compareImage(base+0x17e35d7, vtResidencySignature, sizeof(vtResidencySignature))) return false;
     auto bytes = vtAppendThunk(reinterpret_cast<uintptr_t>(&guardedVtAppend), reinterpret_cast<uintptr_t>(base+0x17e35d7));
     auto thunk = VirtualAlloc(nullptr, bytes.size(), MEM_RESERVE|MEM_COMMIT, PAGE_READWRITE);
     if (!thunk) return false;
