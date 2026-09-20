@@ -13,7 +13,9 @@ static void ok(VkResult value){check(value==VK_SUCCESS,"Vulkan operation failed"
 namespace kharvox::native {
 [[noreturn]] void fail(const char* reason){throw std::runtime_error(reason);}
 }
+static bool copySubmitInvalidatedAerHistory{};
 static void handleCopySubmitResult(Fsr1Upscaler& fsr,VkResult submitResult){
+    copySubmitInvalidatedAerHistory=false;
     struct Hands {void finishSceneIntegratedFrame(){}};
     struct ImageState {bool owned()const{return false;}};
     struct Hud {std::uintptr_t handle{};};
@@ -29,6 +31,10 @@ static void handleCopySubmitResult(Fsr1Upscaler& fsr,VkResult submitResult){
     const auto releaseImageChecked=[](std::uintptr_t,ImageState&){};
     const auto log=[](const std::string&){};
     const auto endEmptyFrame=[](const char*){};
+    const auto invalidateAlternatingStereoHistory=[](bool clearProgrammedViews){
+        check(clearProgrammedViews,"Copy submit recovery must clear programmed AER views");
+        copySubmitInvalidatedAerHistory=true;
+    };
 #include "../src/openxr/XrCopySubmitFailure.inc"
 }
 static VkResult injectedSubmitResult{VK_SUCCESS};
@@ -195,6 +201,8 @@ int main(){try{
                 const auto result=dispatch.queueSubmit(queue,1,&rejected,VK_NULL_HANDLE);
                 check(result==injectedSubmitResult,"Copy submission did not return injected OOM");
                 handleCopySubmitResult(fsr,result);
+                check(copySubmitInvalidatedAerHistory,
+                    "Failed copy submission retained AER cache/source metadata");
                 dispatch.queueSubmit=savedSubmit;
             }
             dispatchCount=undefinedTransitions=0;
