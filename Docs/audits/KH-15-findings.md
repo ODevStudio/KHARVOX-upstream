@@ -109,3 +109,20 @@ not run in this Linux sandbox. A full MSVC Release layer build, injected Vulkan
 allocation/bind failures in the production OpenXR path, and live DOOM/headset
 AER validation remain external verification. No headset performance or visual
 quality improvement is claimed by this source audit.
+
+## Windows review follow-up: XR destination layouts
+
+Failed copy submission also left the acquired XR eye/HUD `initialized` flags
+set by recording. On first-use failure, the next acquisition could therefore
+use `COLOR_ATTACHMENT_OPTIMAL` for a transition that never executed. The shared
+failure handler now clears the owned destination flags before release, using
+the same bounds checks as command-recording failure recovery.
+
+The production-include GPU harness now checks both eyes and HUD state for
+host/device OOM, preserves unrelated images and successful submissions, and
+covers unowned images and out-of-range indices. The added regression failed
+before the fix with `Eye layout not invalidated before release`.
+
+MSVC x64 Release layer build and all three targeted tests passed on Windows:
+`aer-world-view-history`, `swapchain-image-state`, and `fsr1-gpu-current-eyes`
+(NVIDIA GeForce RTX 4090). No live DOOM/headset validation was performed.

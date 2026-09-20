@@ -1,5 +1,9 @@
     if(submitResult!=VK_SUCCESS){
         s.fsr1.discardRecordedFrame();
+        for(int e=0;e<2;++e)if(s.eyeImageStates[e].owned()&&xi[e]<s.eyes[e].initialized.size())
+            s.eyes[e].initialized[xi[e]]=false;
+        if(s.hudImageState.owned()&&hudImageIndex<s.hudQuad.initialized.size())
+            s.hudQuad.initialized[hudImageIndex]=false;
         // Recording already advanced AER cache revisions, source identities
         // and cached eye poses. A failed submit executes none of those copies,
         // so discard the host-side claims just like a recording failure.
