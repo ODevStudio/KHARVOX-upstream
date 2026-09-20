@@ -114,7 +114,17 @@ public:
         }
         return existing;
     }
-    void camera(const AerWeaponCamera& camera){std::lock_guard lock(mutex_);camera_=camera;cameras_.remember(camera.key,camera);}
+    void camera(const AerWeaponCamera& camera){
+        std::lock_guard lock(mutex_);
+        cameras_.remember(camera.key,camera);
+        // Camera hooks can finish out of order on different render workers.
+        // Keep exact historical entries for queued draws, but never let an
+        // older publication demote the source used for new root placement.
+        const bool replace=!camera_.key.valid()
+            ||camera.key.level>camera_.key.level
+            ||(camera.key.level==camera_.key.level&&camera.key.poseId>=camera_.key.poseId);
+        if(replace)camera_=camera;
+    }
     bool frame(AerSourceKey key,uint64_t now,AerWeaponFrame& out){
         std::lock_guard lock(mutex_);AerWeaponCamera camera;AerWeaponInput input;
         if(!cameras_.find(key,camera)||camera.present>now||now-camera.present>aerWeaponSourcePresentAge
