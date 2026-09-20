@@ -34,6 +34,10 @@ class AerWorldViewHistory {
     static bool recent(const AerWorldView& s,uint64_t now,uint64_t level){
         return s.poseId&&s.level==level&&s.present<=now&&now-s.present<=3;
     }
+    static bool sameIdentity(const AerWorldView& a,const AerWorldView& b){
+        return a.context==b.context&&a.poseId==b.poseId&&a.level==b.level
+            &&a.eye==b.eye&&a.domain==b.domain;
+    }
 public:
     AerWorldViewResult recognize(const float* pose,const float* fov,uint64_t now,uint64_t level,AerWorldView& source){
         if(!pose||!fov)return AerWorldViewResult::Invalid;
@@ -41,7 +45,7 @@ public:
         for(size_t n=0;n<count_;++n){const auto& s=entries_[(next_+entries_.size()-1-n)%entries_.size()];
             if(!recent(s,now,level)||std::memcmp(s.pose.data(),pose,sizeof(s.pose))||
                 std::memcmp(s.fov.data(),fov,sizeof(s.fov)))continue;
-            if(found&&(found->context!=s.context||found->poseId!=s.poseId||found->eye!=s.eye||found->domain!=s.domain))
+            if(found&&!sameIdentity(*found,s))
                 return AerWorldViewResult::AmbiguousSource;
             if(!found)found=&s;
         }
@@ -63,7 +67,7 @@ public:
             const auto& s=entries_[(next_+entries_.size()-1-n)%entries_.size()];
             if(!recent(s,now,level)||std::memcmp(s.pose.data(),pose,sizeof(s.pose))||
                 std::memcmp(s.fov.data(),fov,sizeof(s.fov)))continue;
-            if(found&&found->context!=s.context)return AerWorldViewResult::AmbiguousSource;
+            if(found&&!sameIdentity(*found,s))return AerWorldViewResult::AmbiguousSource;
             if(!found)found=&s;
         }
         if(!found)return AerWorldViewResult::UnknownSource;
@@ -72,7 +76,7 @@ public:
         for(size_t n=0;n<count_;++n){
             const auto& s=entries_[(next_+entries_.size()-1-n)%entries_.size()];
             if(!recent(s,now,level)||s.present<source.present||s.context!=source.context||
-                s.poseId!=wantedId||s.eye!=wantedEye||s.fov!=source.fov)continue;
+                s.domain!=source.domain||s.poseId!=wantedId||s.eye!=wantedEye||s.fov!=source.fov)continue;
             target=s;
             return s.pose==source.pose?AerWorldViewResult::Unchanged:AerWorldViewResult::Updated;
         }
