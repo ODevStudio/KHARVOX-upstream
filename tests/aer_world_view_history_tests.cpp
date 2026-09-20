@@ -18,6 +18,24 @@ int main(){
     indistinguishable.remember(old);auto sameImageNewInput=old;sameImageNewInput.poseId=14;
     indistinguishable.remember(sameImageNewInput);
     check(indistinguishable.recognize(old.pose.data(),old.fov.data(),9,2,source)==AerWorldViewResult::AmbiguousSource);
+    // Alignment must be at least as strict as recognition. Identical camera
+    // bytes can be produced by successive static poses; ring order is not
+    // evidence that a copied view belongs to either source identity.
+    check(indistinguishable.align(old.pose.data(),old.fov.data(),14,0,9,2,source,target)
+        ==AerWorldViewResult::AmbiguousSource);
+    AerWorldViewHistory sameBytesDifferentEye;
+    sameBytesDifferentEye.remember(old);
+    auto sameEyeBytes=old;sameEyeBytes.poseId=12;sameEyeBytes.eye=1;
+    sameBytesDifferentEye.remember(sameEyeBytes);
+    check(sameBytesDifferentEye.align(old.pose.data(),old.fov.data(),12,1,9,2,source,target)
+        ==AerWorldViewResult::AmbiguousSource);
+    AerWorldViewHistory domainIsolation;
+    domainIsolation.remember(old);
+    auto scriptedTarget=old;scriptedTarget.poseId=12;scriptedTarget.eye=1;
+    scriptedTarget.domain=2;scriptedTarget.pose[0]=4;
+    domainIsolation.remember(scriptedTarget);
+    check(domainIsolation.align(old.pose.data(),old.fov.data(),12,1,9,2,source,target)
+        ==AerWorldViewResult::MissingTarget);
     auto resolve=[&](const AerWorldView& input,uint64_t wanted,int eye,uint64_t now=9,uint64_t level=2){
         return h.align(input.pose.data(),input.fov.data(),wanted,eye,now,level,source,target);};
     check(resolve(old,12,1)==AerWorldViewResult::Updated);
