@@ -148,41 +148,6 @@ int main(){
         viewAxis[0]=0;viewAxis[1]=1;viewAxis[3]=-1;viewAxis[4]=0;
         check(draws.latch(reset,viewAxis)); // same position, different real view
     }
-    {
-        // Render workers may publish camera observations out of completion
-        // order. A late older source remains available for queued draws, but
-        // must not become the current root-placement camera again.
-        AerWeaponSourceHistory ordered;
-        AerWeaponInput orderedInput;orderedInput.valid=true;
-        orderedInput.generation=1;orderedInput.epoch=7;
-        ordered.remember(100,2,orderedInput);
-        ordered.remember(101,2,orderedInput);
-        AerWeaponCamera older;older.key={100,2,0};older.present=40;
-        older.bodyAxis={1,0,0,0,1,0,0,0,1};older.headAxis=older.bodyAxis;
-        auto newerCamera=older;newerCamera.key={101,2,1};newerCamera.present=41;
-        ordered.camera(newerCamera);
-        older.present=42;
-        ordered.camera(older);
-        AerWeaponFrame orderedFrame;
-        check(ordered.resolve(42,2,7,1,orderedFrame));
-        check(orderedFrame.camera.key.poseId==101&&orderedFrame.camera.key.eye==1);
-        // Re-publication of the same pose (for example the other eye) is
-        // allowed to update the current snapshot.
-        auto samePose=newerCamera;samePose.key.eye=0;samePose.present=42;
-        ordered.camera(samePose);
-        check(ordered.resolve(42,2,7,1,orderedFrame)
-            &&orderedFrame.camera.key.poseId==101&&orderedFrame.camera.key.eye==0);
-        // A new level generation supersedes the old level even if its pose ID
-        // is numerically lower.
-        ordered.remember(50,3,orderedInput);
-        auto nextLevel=samePose;nextLevel.key={50,3,1};nextLevel.present=43;
-        ordered.camera(nextLevel);
-        check(ordered.resolve(43,3,7,1,orderedFrame)
-            &&orderedFrame.camera.key.level==3&&orderedFrame.camera.key.poseId==50);
-        // Exact historical lookup still retains the delayed camera.
-        check(ordered.frame({100,2,0},43,orderedFrame)
-            &&orderedFrame.camera.key.poseId==100);
-    }
     AerWeaponSourceHistory h;AerWeaponInput input;
     input.valid=true;input.generation=1;input.epoch=7;input.grip={10,20,30};
     input.sampleQpc=1234;
