@@ -3329,7 +3329,7 @@ bool ensureStereoCache(VkExtent2D extent){
     s.fsr1.releaseAfterCompletion();
     s.fsr1InitializationAttempted=false;
     invalidateAlternatingStereoHistory(true);
-    auto releaseCache=[&]{
+    auto releaseCurrent=[&]{
         for(int e=0;e<2;e++){
             if(s.stereoCache[e])s.vk.destroyImage(s.device,s.stereoCache[e],nullptr);
             if(s.stereoCacheMemory[e])s.vk.freeMemory(s.device,s.stereoCacheMemory[e],nullptr);
@@ -3338,7 +3338,18 @@ bool ensureStereoCache(VkExtent2D extent){
         }
         s.stereoCacheExtent={};
     };
-    releaseCache();
+    releaseCurrent();
+
+    std::array<VkImage,2> newImages{};
+    std::array<VkDeviceMemory,2> newMemory{};
+    auto discardNew=[&]{
+        for(int e=0;e<2;e++){
+            if(newImages[e])s.vk.destroyImage(s.device,newImages[e],nullptr);
+            if(newMemory[e])s.vk.freeMemory(s.device,newMemory[e],nullptr);
+            newImages[e]=VK_NULL_HANDLE;
+            newMemory[e]=VK_NULL_HANDLE;
+        }
+    };
     VkPhysicalDeviceMemoryProperties properties{};
     s.vk.getPhysicalDeviceMemoryProperties(s.physical,&properties);
     for(int e=0;e<2;e++){
@@ -3351,27 +3362,33 @@ bool ensureStereoCache(VkExtent2D extent){
         ci.usage=VK_IMAGE_USAGE_TRANSFER_SRC_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT;
         ci.sharingMode=VK_SHARING_MODE_EXCLUSIVE;
         ci.initialLayout=VK_IMAGE_LAYOUT_UNDEFINED;
-        if(s.vk.createImage(s.device,&ci,nullptr,&s.stereoCache[e])!=VK_SUCCESS){
-            releaseCache();return false;
+        VkImage image=VK_NULL_HANDLE;
+        if(s.vk.createImage(s.device,&ci,nullptr,&image)!=VK_SUCCESS){
+            discardNew();return false;
         }
+        newImages[e]=image;
         VkMemoryRequirements requirements{};
-        s.vk.getImageMemoryRequirements(s.device,s.stereoCache[e],&requirements);
+        s.vk.getImageMemoryRequirements(s.device,image,&requirements);
         uint32_t memoryType=UINT32_MAX;
         for(uint32_t i=0;i<properties.memoryTypeCount;i++)
             if((requirements.memoryTypeBits&(1u<<i))
                 &&(properties.memoryTypes[i].propertyFlags&VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)){
                 memoryType=i;break;
             }
-        if(memoryType==UINT32_MAX){releaseCache();return false;}
+        if(memoryType==UINT32_MAX){discardNew();return false;}
         VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
         ai.allocationSize=requirements.size;ai.memoryTypeIndex=memoryType;
-        if(s.vk.allocateMemory(s.device,&ai,nullptr,&s.stereoCacheMemory[e])!=VK_SUCCESS){
-            releaseCache();return false;
+        VkDeviceMemory memory=VK_NULL_HANDLE;
+        if(s.vk.allocateMemory(s.device,&ai,nullptr,&memory)!=VK_SUCCESS){
+            discardNew();return false;
         }
-        if(s.vk.bindImageMemory(s.device,s.stereoCache[e],s.stereoCacheMemory[e],0)!=VK_SUCCESS){
-            releaseCache();return false;
+        newMemory[e]=memory;
+        if(s.vk.bindImageMemory(s.device,image,memory,0)!=VK_SUCCESS){
+            discardNew();return false;
         }
     }
+    s.stereoCache=newImages;
+    s.stereoCacheMemory=newMemory;
     s.stereoCacheExtent=extent;
     log("Stereo cache ready "+std::to_string(extent.width)+"x"
         +std::to_string(extent.height)+" format="+std::to_string(s.format));
