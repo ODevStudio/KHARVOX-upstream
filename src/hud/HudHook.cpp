@@ -1,4 +1,5 @@
 #include "../common/GameMemory.h"
+#include "MenuVtableHook.h"
 #include "../common/DiagnosticLogging.h"
 #include "HudHook.h"
 #include "OffhandHudPolicy.h"
@@ -1007,7 +1008,7 @@ bool __fastcall runeChallengeHandleActionHook(void* screen, void* action) {
     // outgoing screen and begin the map teardown inside HandleAction_Impl.
     const bool isStart = actionType == 1 && commandIndex == 0;
     const bool startFlagBefore = isStart && runeChallengeStartFlag(screen);
-    const bool handled = originalRuneChallengeHandleAction(screen, action);
+    const bool handled = kharvox::hud::originalVtableFunction(originalRuneChallengeHandleAction)(screen, action);
     // HandleAction returns true for inputs swallowed during the native opening
     // transition / challenge load. Only the actual Start branch sets +0x248.
     // Do not confuse "consumed" with a completed menu command.
@@ -1476,18 +1477,13 @@ bool installMenuVtableHook(
             + " vtable target mismatch; native menu lifecycle hook disabled");
         return false;
     }
-    DWORD oldProtect{};
-    if (!VirtualProtect(
-            const_cast<void**>(entry), sizeof(void*), PAGE_READWRITE,
-            &oldProtect)) {
-        log(std::string(label) + " vtable protection failed");
-        return false;
-    }
-    original = reinterpret_cast<Function>(expected);
-    InterlockedExchangePointer(entry, const_cast<void*>(hook));
-    DWORD ignored{};
-    VirtualProtect(const_cast<void**>(entry), sizeof(void*), oldProtect, &ignored);
-    return true;
+    const auto result = kharvox::hud::installVtableFunction(
+        entry, reinterpret_cast<Function>(expected), hook, original);
+    if (!result.protectionRestored)
+        log(std::string(label) + " vtable protection restore failed");
+    if (!result.installed)
+        log(std::string(label) + " vtable installation rejected; slot changed or protection failed");
+    return result.installed;
 }
 
 void __fastcall campaignDeathShowHook(void* deathScreen, int transitionType) {
@@ -1496,11 +1492,11 @@ void __fastcall campaignDeathShowHook(void* deathScreen, int transitionType) {
     if (!deathMenuActive.exchange(true, std::memory_order_acq_rel))
         log("native CampaignDeath screen shown; Death-menu QUAD active (transition="
             + std::to_string(transitionType) + ")");
-    originalCampaignDeathShow(deathScreen, transitionType);
+    kharvox::hud::originalVtableFunction(originalCampaignDeathShow)(deathScreen, transitionType);
 }
 
 void __fastcall campaignDeathHideHook(void* deathScreen, int transitionType) {
-    originalCampaignDeathHide(deathScreen, transitionType);
+    kharvox::hud::originalVtableFunction(originalCampaignDeathHide)(deathScreen, transitionType);
     // GUI screen transition observations use 0/1 while traversing child screens
     // and 2 when the complete screen session closes. Keep a confirmation or
     // nested screen in QUAD just as the native Pause lifecycle already does.
@@ -1622,10 +1618,10 @@ bool installScreenLifecyclePair(
 #define KHARVOX_DEFINE_MASKED_SCREEN_HOOKS(prefix, originalPrefix, mask, generation, bit, label) \
     void __fastcall prefix##ShowHook(void* screen, int transitionType) { \
         beginDeathStyleScreenSession(mask, generation, bit, label, transitionType); \
-        originalPrefix##Show(screen, transitionType); \
+        kharvox::hud::originalVtableFunction(originalPrefix##Show)(screen, transitionType); \
     } \
     void __fastcall prefix##HideHook(void* screen, int transitionType) { \
-        originalPrefix##Hide(screen, transitionType); \
+        kharvox::hud::originalVtableFunction(originalPrefix##Hide)(screen, transitionType); \
         endDeathStyleScreenSession(mask, bit, label, transitionType); \
     }
 
@@ -1645,11 +1641,11 @@ void __fastcall argentSelectionShowHook(void* screen, int transitionType) {
     beginDeathStyleScreenSession(
         playerUpgradeScreenMask, playerUpgradeMenuGenerationAtShow,
         argentSelectionBit, "Gui_ArgentSelection", transitionType);
-    originalArgentSelectionShow(screen, transitionType);
+    kharvox::hud::originalVtableFunction(originalArgentSelectionShow)(screen, transitionType);
 }
 
 void __fastcall argentSelectionHideHook(void* screen, int transitionType) {
-    originalArgentSelectionHide(screen, transitionType);
+    kharvox::hud::originalVtableFunction(originalArgentSelectionHide)(screen, transitionType);
     endDeathStyleScreenSession(
         playerUpgradeScreenMask, argentSelectionBit,
         "Gui_ArgentSelection", transitionType, true);
@@ -1666,11 +1662,11 @@ void __fastcall dossierSuitDiagShowHook(void* screen, int transitionType) {
     beginDeathStyleScreenSession(
         playerUpgradeScreenMask, playerUpgradeMenuGenerationAtShow,
         dossierSuitDiagBit, "Dossier_SuitDiag", transitionType);
-    originalDossierSuitDiagShow(screen, transitionType);
+    kharvox::hud::originalVtableFunction(originalDossierSuitDiagShow)(screen, transitionType);
 }
 
 void __fastcall dossierSuitDiagHideHook(void* screen, int transitionType) {
-    originalDossierSuitDiagHide(screen, transitionType);
+    kharvox::hud::originalVtableFunction(originalDossierSuitDiagHide)(screen, transitionType);
     // The post-Rune assignment Dossier closes with transition 1. Releasing
     // only this exact screen bit returns ownership to the normal presentation
     // selector, so Immersive, Comfort, and cinematics-only Quad settings keep
@@ -1775,11 +1771,11 @@ void __fastcall runeSelectShowHook(void* screen, int transitionType) {
     if (!runeSelectMenuActive.exchange(true, std::memory_order_acq_rel))
         log("native Gui_RuneSelect shown; centered full-frame Quad/UI active (transition="
             + std::to_string(transitionType) + ")");
-    originalRuneSelectShow(screen, transitionType);
+    kharvox::hud::originalVtableFunction(originalRuneSelectShow)(screen, transitionType);
 }
 
 void __fastcall runeSelectHideHook(void* screen, int transitionType) {
-    originalRuneSelectHide(screen, transitionType);
+    kharvox::hud::originalVtableFunction(originalRuneSelectHide)(screen, transitionType);
     // RuneSelect owns one selection screen rather than an overlapping Dossier
     // hierarchy. Any native HideScreen therefore ends its input and camera
     // ownership immediately, including a confirmed Rune Trial selection.
@@ -1805,11 +1801,11 @@ bool installRuneSelectMenuLifecycleHooks() {
 void __fastcall runeChallengeShowHook(void* screen, int transitionType) {
     beginRuneChallengeScreenSession(
         "native Gui_EndOfChallenge ShowScreen");
-    originalRuneChallengeShow(screen, transitionType);
+    kharvox::hud::originalVtableFunction(originalRuneChallengeShow)(screen, transitionType);
 }
 
 void __fastcall runeChallengeHideHook(void* screen, int transitionType) {
-    originalRuneChallengeHide(screen, transitionType);
+    kharvox::hud::originalVtableFunction(originalRuneChallengeHide)(screen, transitionType);
     if (kharvox::shouldRetainRuneChallengeMapLoadAfterHide(
             runeChallengeScreenActive.load(std::memory_order_acquire),
             runeChallengeMapLoadPending.load(std::memory_order_acquire),
@@ -2093,7 +2089,7 @@ using VoiceCommUpdate=void(__fastcall*)(void*);
 VoiceCommUpdate originalVoiceCommUpdate{};
 thread_local bool voiceCommTransformActive{};
 void __fastcall voiceCommUpdateHook(void* widget){
-    originalVoiceCommUpdate(widget);
+    kharvox::hud::originalVtableFunction(originalVoiceCommUpdate)(widget);
     if(!widget||!readableRange(widget,16))return;
     auto sprite=*reinterpret_cast<void**>(static_cast<unsigned char*>(widget)+8);
     voiceCommOwner.store(widget,std::memory_order_relaxed);
@@ -2104,7 +2100,7 @@ void __fastcall voiceCommUpdateHook(void* widget){
 using ObjectiveUpdate = void(__fastcall*)(void*);
 ObjectiveUpdate originalObjectiveUpdate{};
 void __fastcall objectiveUpdateHook(void* widget) {
-    originalObjectiveUpdate(widget);
+    kharvox::hud::originalVtableFunction(originalObjectiveUpdate)(widget);
     // Native BindSprite (FAE870) stores the resolved Flash element at +8.
     if (widget && readableRange(widget,16)) {
         void* sprite=*reinterpret_cast<void**>(static_cast<unsigned char*>(widget)+8);
@@ -2120,7 +2116,7 @@ using BossVitalsUpdate=void(__fastcall*)(void*);
 BossVitalsUpdate originalBossVitalsUpdate{};
 thread_local bool bossVitalsTransformActive{};
 void __fastcall bossVitalsUpdateHook(void* widget){
-    originalBossVitalsUpdate(widget);
+    kharvox::hud::originalVtableFunction(originalBossVitalsUpdate)(widget);
     if(!widget||!readableRange(widget,0x1B4))return;
     auto bytes=static_cast<unsigned char*>(widget);
     const int type=*reinterpret_cast<int*>(bytes+0x1B0);
@@ -2141,7 +2137,7 @@ thread_local bool runeCounterTransformActive{};
 thread_local void* runeCanvasSwf{};
 thread_local std::array<float,6> runeCanvasMatrix{};
 void __fastcall runeCounterUpdateHook(void* screen) {
-    originalRuneCounterUpdate(screen);
+    kharvox::hud::originalVtableFunction(originalRuneCounterUpdate)(screen);
     if(!screen || !readableRange(screen,0x1E0))return;
     // Gui_EndOfChallenge initialization binds _timer_runes, movement timer,
     // and middle to these three widgets. The left objective and menus are separate.
@@ -2318,10 +2314,10 @@ void endTutorialScreenActivity(
 #define KHARVOX_DEFINE_TUTORIAL_SCREEN_HOOKS(prefix, originalPrefix, bit, label) \
     void __fastcall prefix##ShowHook(void* screen, int transitionType) { \
         beginTutorialScreenActivity(bit, label, transitionType); \
-        originalPrefix##Show(screen, transitionType); \
+        kharvox::hud::originalVtableFunction(originalPrefix##Show)(screen, transitionType); \
     } \
     void __fastcall prefix##HideHook(void* screen, int transitionType) { \
-        originalPrefix##Hide(screen, transitionType); \
+        kharvox::hud::originalVtableFunction(originalPrefix##Hide)(screen, transitionType); \
         endTutorialScreenActivity(bit, label, transitionType); \
     }
 
@@ -2340,7 +2336,7 @@ KHARVOX_DEFINE_TUTORIAL_SCREEN_HOOKS(
 void __fastcall tutorialManagerFrameHook(
     void* tutorialManager, int frameTime) {
     publishTutorialTextSwf(tutorialManager);
-    originalTutorialManagerFrame(tutorialManager, frameTime);
+    kharvox::hud::originalVtableFunction(originalTutorialManagerFrame)(tutorialManager, frameTime);
     publishTutorialTextSwf(tutorialManager);
 
     // idMenuManager_Tutorial keeps the owner of the currently rendered
@@ -2386,7 +2382,7 @@ void observeHudMovie(void* manager,const char* source){
     }
 }
 void __fastcall hudMovieFrameHook(void* manager,int frameTime){
-    originalHudMovieFrame(manager,frameTime);
+    kharvox::hud::originalVtableFunction(originalHudMovieFrame)(manager,frameTime);
     observeHudMovie(manager,"manager-frame");
 }
 bool installHudMovieHook(){

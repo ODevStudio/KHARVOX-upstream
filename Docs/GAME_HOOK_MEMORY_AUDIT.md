@@ -23,7 +23,7 @@ signature reads. The benchmark work and AER PR #8 are outside this PR.
 | GH-02 | P1 | Consumers invoked physics and read control flags through retained player addresses, despite KH-07's coherent body/physics publication. | Extend `CameraPoseState` with captured control/sync flags, freshness and out-of-order rejection. Consumers read copied values. Physics calls remain inside the player callback. Body/HUD pose readers and writers use matching locks. Invalidation rejects older in-flight publications. |
 | GH-03 | P1, fixed on baseline | Muzzle aiming formerly rewrote a six-byte branch while other threads could execute it. | Preserve KH-08's MinHook-backed conditional thunk and aligned `LONG` toggle. This PR adds bounded reads before signature comparison, with unreadable/overflow regression cases. Manual patches elsewhere remain under GH-08. |
 | GH-04 | P1 | The optional camera scanner wrote through a retained heap candidate; weapon diagnostic probes read memory after a non-owning `VirtualQuery` check and called native joints through a retained prop. | Camera scanning is read-only; F9/F10 candidate writes are removed. Diagnostic scans use local checked copies. Retained-prop joint calls are withheld. Callback-owned hands/model calls remain. |
-| GH-05 | P1 | Player ViewAxis installation could publish competing originals or hook its own adapter during concurrent callbacks. | Serialize installation, require aligned image-owned vtable storage and image-owned executable target, publish the original before CAS, and refuse a changed slot. Report protection-restore failure. This does not fingerprint the exact dynamic target. |
+| GH-05 | P1 | Player ViewAxis installation could publish competing originals or hook its own adapter during concurrent callbacks. HUD menu installation could overwrite an intervening hook. | Serialize installation, validate image-owned slots and targets, and use expected-pointer CAS. HUD callbacks acquire the publication lock before loading the original; HUD installation publishes it only after successful CAS. Report protection-restore failures. The dynamic ViewAxis target still lacks an exact fingerprint. |
 | GH-06 | P2 | Pattern parsing accepted malformed tokens; camera scanning selected the first duplicate signature; unwind traversal could return an arbitrary record after exhausting its cycle bound. | Reject malformed and duplicate signatures; scan copied bytes; reject invalid PE/section bounds and exhausted unwind chains. |
 | GH-07 | P1 | XInput import parsing walked unbounded descriptors, DLL names and thunks. | `GameImports.h` bounds descriptor/name/ordinal/IAT reads, rejects duplicate ordinals, missing original thunks and misaligned slots. Serialize installation and CAS the expected IAT value rather than overwriting an intervening hook. |
 
@@ -81,7 +81,9 @@ must move to an engine-owned callback. SEH is not a lifetime mechanism.
   timestamp/size does not authenticate executable contents or third-party mods.
 - HUD lifecycle pairs can install partially. Mismatch disables the affected
   hook, but already-installed siblings remain. Exercise each partial failure
-  before treating lifecycle-derived ownership as reliable.
+  before treating lifecycle-derived ownership as reliable. In particular,
+  `installProgMeterHooks` patches entry hooks before its separate vtable patch;
+  the menu-vtable CAS fix does not make that sequence transactional.
 - Upstream Raw Input diagnostics are outside the active layer target. Their
   registration logging trusts caller buffers before the API validates them;
   mouse logging lacks a returned-size check. Partial install/retry handling also
@@ -124,15 +126,15 @@ dispatch. `EngineProfile.inc` is the authoritative RVA/hash list.
 cmake -S . -B ../doomvr-memory-audit-pr-build -G "Visual Studio 17 2022" -A x64 -DBUILD_TESTING=ON -DKHARVOX_BUILD_LAYER=ON -DKHARVOX_BUILD_SFS_COMPILER=OFF
 python -B tools/inventory_game_memory.py --output ../doomvr-memory-audit-pr-build/inventory
 python -B tests/test_game_memory_inventory.py
-cmake --build ../doomvr-memory-audit-pr-build --config Release --target KharvoxLayer KharvoxGameMemorySafetyTests KharvoxGamePatternScanTests KharvoxVirtualTextureGuardTests KharvoxAerCameraPairCacheTests KharvoxEngineMemoryCapacityTests KharvoxForeignProcessLayerTests KharvoxHudMenuPolicyTests KharvoxCameraBasisPolicyTests KharvoxGameImageLifetimeTests KharvoxDoomViewEffectsTests KharvoxBodyCameraSnapshotTests KharvoxPhysicsOriginTests KharvoxMuzzleBranchTests
-ctest --test-dir ../doomvr-memory-audit-pr-build -C Release -R "^(game-memory-safety|game-pattern-scan|virtual-texture-guard|aer-camera-pair-cache|engine-memory-capacity|foreign-process-layer|hud-menu-policy|camera-basis-policy|game-image-lifetime|doom-view-effects|body-camera-snapshot|physics-origin|muzzle-branch)$" --output-on-failure
+cmake --build ../doomvr-memory-audit-pr-build --config Release --target KharvoxLayer KharvoxGameMemorySafetyTests KharvoxGamePatternScanTests KharvoxVirtualTextureGuardTests KharvoxAerCameraPairCacheTests KharvoxEngineMemoryCapacityTests KharvoxForeignProcessLayerTests KharvoxHudMenuPolicyTests KharvoxCameraBasisPolicyTests KharvoxGameImageLifetimeTests KharvoxDoomViewEffectsTests KharvoxBodyCameraSnapshotTests KharvoxPhysicsOriginTests KharvoxMuzzleBranchTests KharvoxMenuVtableHookTests
+ctest --test-dir ../doomvr-memory-audit-pr-build -C Release -R "^(game-memory-safety|game-pattern-scan|virtual-texture-guard|aer-camera-pair-cache|engine-memory-capacity|foreign-process-layer|hud-menu-policy|camera-basis-policy|game-image-lifetime|doom-view-effects|body-camera-snapshot|physics-origin|muzzle-branch|menu-vtable-hook)$" --output-on-failure
 ```
 
 The index scans source directories for pointer/cast/offset, detour, protection,
 signature, probe and publication occurrences. It includes false positives and
 cannot find all implicit dereferences, aliases or assembly effects. CSVs stay in
 the external build directory so line-number churn does not enter source control.
-The PR working tree produced 9,303 occurrences in 23 CSVs. The earlier audit
+The revised PR working tree produced 9,310 occurrences in 23 CSVs. The earlier audit
 workspace produced 9,317; that workspace included benchmark edits and duplicate
 helpers superseded by KH-07/KH-08. Neither count means verified hook contracts.
 
@@ -144,15 +146,23 @@ The existing `muzzle-branch` check executes the production hook during concurren
 toggles and verifies unchanged instruction bytes. It now also tests unreadable
 signatures. `game-pattern-scan` includes the production parser/scanner directly.
 
-Verification: MSVC x64 Release layer build passed. Thirteen targeted CTest checks
+Local verification: MSVC x64 Release layer build passed. Fourteen targeted CTest checks
 passed: game-memory-safety, game-pattern-scan, virtual-texture-guard,
 aer-camera-pair-cache, engine-memory-capacity, foreign-process-layer,
 hud-menu-policy, camera-basis-policy, game-image-lifetime, doom-view-effects,
-body-camera-snapshot, physics-origin and muzzle-branch.
-The Python inventory check passed. The VT test now expects the production
-installer to reject heap-backed fake images, then executes the generated thunk
-separately. This retains its executable-code regression check without weakening
-the new image-ownership requirement.
+body-camera-snapshot, physics-origin, muzzle-branch and menu-vtable-hook.
+The Python inventory check passed. The VT test calls the real installer with an
+explicit synthetic `Image`, then executes its installed jump and continuation.
+It checks RX protection restoration, cache-flush calls, refusal of invalid images,
+and thunk cleanup on pre-patch protection failures. The production entry point
+still requires the supported main executable and image-owned storage.
+
+The menu-vtable test injects a competing slot replacement between validation and
+CAS, first/second protection-call failures, and a callback during installation.
+It verifies that a lost CAS preserves the competing hook and leaves the original
+unpublished. After a successful CAS, a restoration failure leaves the installed
+hook and original intact and produces a diagnostic; no live rollback is attempted.
+These are local MSVC/CTest results, not GitHub Actions or commit-status evidence.
 
 No game executable patch installation, level teardown, VR headset run, release
 packaging, sanitizer run or performance benchmark was performed. Supported-build
