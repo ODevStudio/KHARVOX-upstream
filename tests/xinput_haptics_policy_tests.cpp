@@ -215,5 +215,18 @@ int main() {
     // refreshed at 25ms, not treated as a still-running 100ms native pulse.
     if (selectXInputHapticCommand(clickOutput, clickOnly, 125)
         != XInputHapticCommand::Apply) return 42;
+    queueControllerClick(click, 200);
+    for (const auto& signal : {zero, strong, fallbackFanout.controllerSignal}) {
+        const auto muted = mixControllerClick(signal, click, 210, false);
+        if (muted.active || muted.amplitude != 0.f) return 43;
+        XInputHapticOutputState output{};
+        if (selectXInputHapticCommand(output, muted, 210) != XInputHapticCommand::None) return 44;
+        noteXInputHapticApplySucceeded(output, strong, 200);
+        if (selectXInputHapticCommand(output, muted, 210) != XInputHapticCommand::Stop) return 45;
+        noteXInputHapticStopAttempted(output);
+        if (selectXInputHapticCommand(output, muted, 211) != XInputHapticCommand::None) return 46;
+    }
+    if (!mixControllerClick(strong, click, 210, true).active) return 47;
+    if (selectAdditiveHapticFanout(0, zero, true).bhapticsRumble != fallbackFanout.bhapticsRumble) return 48;
     return 0;
 }

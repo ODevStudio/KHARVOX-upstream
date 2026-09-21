@@ -219,6 +219,7 @@ struct State {
     bool actionsReady{}; bool hapticActionsReady{}; bool hapticBindingsSuggested{}; bool hapticFrequencyUnspecified{}; bool firstControllerHapticAppliedLogged{}; bool firePressed{},primaryFireDown{},jumpPressed{},crouchPressed{};
     unsigned long long psvr2FireStartedTick{}; KharvoxWeaponKind psvr2FireWeapon{KharvoxWeaponKind::Unknown};
     std::array<kharvox::XInputHapticOutputState,2> hapticOutputStates{};
+    bool controllerVibrationEnabled{true};
     kharvox::XInputRumbleFrameAccumulator hapticFrameAccumulator{};
     unsigned long long weaponFireHapticFallbackUntilTick{};
     unsigned long long nextHapticErrorLogTick{}; uint64_t hapticErrorCount{};
@@ -867,7 +868,7 @@ void updateXInputHaptics(){
 
     const std::array<XrAction,2> actions{s.leftHaptic,s.rightHaptic};
     for(size_t hand=0;hand<actions.size();++hand){
-        const auto desired=kharvox::mixControllerClick(nativeDesired[hand],s.wheelClicks[hand],now);
+        const auto desired=kharvox::mixControllerClick(nativeDesired[hand],s.wheelClicks[hand],now,s.controllerVibrationEnabled);
         auto&outputState=s.hapticOutputStates[hand];
         const auto command=kharvox::selectXInputHapticCommand(
             outputState,desired,now);
@@ -2512,6 +2513,8 @@ void updateGameplayActions(XrTime displayTime){
     updateWeapon6Dof();
 }
 bool createGameplayActions(){
+    s.controllerVibrationEnabled=!environmentEnabled("KHARVOX_DISABLE_CONTROLLER_VIBRATION");
+    log(std::string("[HAPTICS] controller vibration=")+(s.controllerVibrationEnabled?"enabled":"disabled"));
     s.leftHanded=environmentEnabled("KHARVOX_LEFT_HANDED");
     s.favoriteBackWeapon=loadBackWeaponKind();
     char leftHandSwap[32]{};

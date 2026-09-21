@@ -4,7 +4,7 @@ namespace KharvoxLauncher;
 
 internal sealed class LauncherSettings
 {
-    internal const int CurrentVersion = 33;
+    internal const int CurrentVersion = 34;
 
     public int SettingsVersion { get; set; }
     public int Preset { get; set; }
@@ -41,6 +41,7 @@ internal sealed class LauncherSettings
     public bool ShowHands { get; set; } = LauncherPresetPolicy.DefaultEnableHands;
     public int HandCalibrationMode { get; set; }
     public bool EnableBhaptics { get; set; }
+    public bool ControllerVibration { get; set; } = true;
     public bool UsePsvr2Toolkit { get; set; }
 
     public LauncherSettings() { }

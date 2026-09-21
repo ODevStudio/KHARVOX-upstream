@@ -32,6 +32,7 @@ internal static class SelfTest
         try
         {
             Directory.CreateDirectory(testRoot);
+            ControllerVibrationTests.Run(testRoot);
             VerifyModConflictPreflight(testRoot);
             VerifyProcessStatusPreservesExitCode();
             bool sfsBlocked=false;
@@ -1048,7 +1049,7 @@ internal static class SelfTest
             && hands.Left >= laser.Right, "hands is on main page right of laser");
         Require(handsJump.Parent == hands.Parent && handsJump.Left == hands.Left
             && handsJump.Top >= hands.Bottom, "Hands Jump below Enable Hands");
-        foreach (var check in new[] { hands, laser, handsJump, Field<CheckBox>("usePsvr2Toolkit") })
+        foreach (var check in new[] { hands, laser, handsJump, Field<CheckBox>("usePsvr2Toolkit"), Field<CheckBox>("controllerVibration") })
             Require(check.Width >= TextRenderer.MeasureText(check.Text, check.Font).Width + 18,
                 "checkbox text fits: " + check.Text);
         var previewDirectory = Environment.GetEnvironmentVariable("KHARVOX_SELFTEST_LAYOUT_DIR");
