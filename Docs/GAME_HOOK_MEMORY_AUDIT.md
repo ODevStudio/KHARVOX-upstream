@@ -168,3 +168,38 @@ No game executable patch installation, level teardown, VR headset run, release
 packaging, sanitizer run or performance benchmark was performed. Supported-build
 metadata comes from the existing Native profile. Optional SDK warnings concern
 missing PSVR2 Toolkit/bHaptics packaging dependencies, not audit test failures.
+
+## Follow-up: SteamVR Startup Reentry (2026-09-20)
+
+The combined PR #8/#9 build at `614854ce` crashed during SFS startup with
+exception `0xE06D7363`. A local debugger captured this call path:
+
+`KharvoxXRCreateVulkanDevice -> xrGetVulkanGraphicsDevice2KHR -> SteamVR ->
+Vulkan loader negotiation -> KharvoxXRInstallGameHooks -> std::_Throw_Cpp_error`.
+
+The device-creation path held the XR state mutex. The repeated loader negotiation
+called the hook installer, which tried to lock that mutex before checking whether
+installation had finished. Same-thread reentry threw; a runtime callback on another
+thread could block its caller instead.
+
+`GameHookStartup.inc` now uses `std::call_once` around the initial installation.
+Subsequent negotiations do not acquire the XR mutex. Initial installation still
+locks shared state and checks executable identity and signatures. Failed validation
+keeps the optional hook disabled rather than attempting a later live patch.
+
+Four `game-hook-startup-*` tests include the production installer and cover supported
+images, unsupported images, signature mismatch and installation failure. Each
+checks concurrent first callers, then same-thread and cross-thread calls while the
+XR mutex is held. The old implementation failed the cross-thread completion check;
+the fix passes all four cases and the previous eighteen targeted tests in the
+combined PR #8/#9 build.
+
+Local MSVC x64 Release validation also included a 60-second debugger-controlled
+DOOM/SteamVR startup on an RTX 4090. The fixed build passed repeated negotiation,
+created its Vulkan device, XR session and SFS source images, and reached shell
+initialization without the tracked C++ or access-violation exceptions. The debugger
+stopped that test process at the time limit. On 2026-09-21, the user confirmed the
+DOOM menu was visible in the headset after a real-launcher run with the VR intro.
+That combined test package also contained a separate launcher process-tracking fix,
+which is not part of this PR. Gameplay, the reported weapon-motion FPS regression
+and the remaining audit risks are not cleared by these checks.
