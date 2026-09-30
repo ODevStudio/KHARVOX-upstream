@@ -17,6 +17,10 @@ int main(){
     assert(call(0)==11&&call(1)==22);
     kharvox::MuzzleBranchHook hook;
     assert(!hook.set(true));
+    assert(!hook.install(reinterpret_cast<unsigned char*>(UINTPTR_MAX-2),{0x0f,0x85,6,0,0,0}));
+    assert(VirtualProtect(code,4096,PAGE_NOACCESS,&previous));
+    assert(!hook.install(code+7,{0x0f,0x85,6,0,0,0}));
+    assert(VirtualProtect(code,4096,PAGE_EXECUTE_READ,&previous));
     assert(!hook.install(code+7,{0x0f,0x85,7,0,0,0}));
     assert(call(0)==11&&call(1)==22);
     assert(hook.install(code+7,{0x0f,0x85,6,0,0,0}));

@@ -1,6 +1,7 @@
 #pragma once
 #include "VirtualTextureAppend.h"
 #include "VirtualTextureAppendSignature.h"
+#include "../common/GameMemory.h"
 #include <windows.h>
 #include <atomic>
 #include <cstdio>
@@ -60,11 +61,11 @@ inline std::vector<uint8_t> vtAppendThunk(uintptr_t helper, uintptr_t continuati
     emit({0xff,0x25,0,0,0,0}); address(continuation);
     return code;
 }
-inline bool installVirtualTextureGuard(uint8_t* base, uint32_t imageSize) {
-    if (imageSize < 0x17e35d7 + sizeof(vtResidencySignature)) return false;
+inline bool installVirtualTextureGuard(const gameMemory::Image& image) {
+    if (!image.matches(0x17e3567, vtAppendSignature, sizeof(vtAppendSignature))
+        || !image.matches(0x17e35d7, vtResidencySignature, sizeof(vtResidencySignature))) return false;
+    auto base = const_cast<unsigned char*>(image.base);
     auto target = base + 0x17e3567;
-    if (memcmp(target, vtAppendSignature, sizeof(vtAppendSignature))) return false;
-    if (memcmp(base+0x17e35d7, vtResidencySignature, sizeof(vtResidencySignature))) return false;
     auto bytes = vtAppendThunk(reinterpret_cast<uintptr_t>(&guardedVtAppend), reinterpret_cast<uintptr_t>(base+0x17e35d7));
     auto thunk = VirtualAlloc(nullptr, bytes.size(), MEM_RESERVE|MEM_COMMIT, PAGE_READWRITE);
     if (!thunk) return false;
@@ -82,5 +83,12 @@ inline bool installVirtualTextureGuard(uint8_t* base, uint32_t imageSize) {
     FlushInstructionCache(GetCurrentProcess(),target,sizeof(jump));
     vtGuardLog("[KHARVOX][VT-GUARD] DOOM 20240321 bounded texture-page append installed (capacity=8192)\r\n");
     return true;
+}
+inline bool installVirtualTextureGuard(uint8_t* base, uint32_t imageSize) {
+    const auto& image = gameMemory::mainImage();
+    return base == image.base && imageSize == image.size && gameMemory::supportedDoomImage()
+        && gameMemory::imageRange(base + 0x17e3567, sizeof(vtAppendSignature))
+        && gameMemory::imageRange(base + 0x17e35d7, sizeof(vtResidencySignature))
+        && installVirtualTextureGuard(image);
 }
 }

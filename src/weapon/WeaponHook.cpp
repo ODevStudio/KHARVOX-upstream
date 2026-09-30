@@ -1,3 +1,4 @@
+#include "../common/GameMemory.h"
 #include "LaserWorldPose.h"
 #include "MuzzleBranchHook.h"
 #include "LaserSourcePolicy.h"
@@ -218,7 +219,7 @@ bool installMuzzleFireAxisOverride(unsigned char* image) {
     // while a valid VR weapon pose is active.
     auto branch = image + 0xD5EFF3;
     constexpr unsigned char signature[]{0x0F,0x85,0x6A,0x06,0x00,0x00};
-    if (std::memcmp(branch, signature, sizeof(signature))) {
+    if (kharvox::gameMemory::compareImage(branch, signature, sizeof(signature))) {
         log("RVA 0xD5EFF3 useMuzzleAsFireAxis branch signature mismatch; VR shot direction disabled");
         return false;
     }
@@ -254,7 +255,7 @@ bool installFrontPushbackSuppression(unsigned char* image) {
         // jmp 0x6306B4; nop
         0xE9,0xF3,0x00,0x00,0x00,0x90
     };
-    if (std::memcmp(target, signature, sizeof(signature))) {
+    if (kharvox::gameMemory::compareImage(target, signature, sizeof(signature))) {
         log("hands collision-pushback signature mismatch at RVA 0x6305B4; suppression disabled");
         return false;
     }
@@ -288,13 +289,14 @@ bool armHandsHitReactionSuppression(unsigned char* image) {
     auto updateGate = image + 0xD892E4;
     constexpr unsigned char triggerSignature[]{0x83,0x3D,0x11,0x6E,0xE2,0x04,0x00};
     constexpr unsigned char updateSignature[]{0x83,0x3D,0xC5,0x64,0xE2,0x04,0x00};
-    if (std::memcmp(triggerGate, triggerSignature, sizeof(triggerSignature)) ||
-        std::memcmp(updateGate, updateSignature, sizeof(updateSignature))) {
+    if (kharvox::gameMemory::compareImage(triggerGate, triggerSignature, sizeof(triggerSignature)) ||
+        kharvox::gameMemory::compareImage(updateGate, updateSignature, sizeof(updateSignature))) {
         log("hands hit-reaction gate signature mismatch at RVA 0xD88998; suppression disabled");
         return false;
     }
 
     auto value = reinterpret_cast<volatile LONG*>(image + 0x5BAF7B0);
+    if (!kharvox::gameMemory::imageRange(image + 0x5BAF7B0, sizeof(LONG), true)) return false;
     const LONG current = InterlockedCompareExchange(value, 0, 0);
     if (current != 0 && current != 1) {
         log("hands_hitReactionsEnable has an unexpected initial value; suppression disabled");
@@ -352,12 +354,13 @@ bool armWeaponKickSuppression(unsigned char* image) {
     // motion without touching damage or physical knockback.
     auto gate = image + 0xE489B7;
     constexpr unsigned char signature[]{0x83,0x3D,0xC2,0x62,0xD1,0x04,0x00};
-    if (std::memcmp(gate, signature, sizeof(signature))) {
+    if (kharvox::gameMemory::compareImage(gate, signature, sizeof(signature))) {
         log("g_weaponKick gate signature mismatch at RVA 0xE489B7; suppression disabled");
         return false;
     }
 
     auto value = reinterpret_cast<volatile LONG*>(image + 0x5B5EC80);
+    if (!kharvox::gameMemory::imageRange(image + 0x5B5EC80, sizeof(LONG), true)) return false;
     const LONG current = InterlockedCompareExchange(value, 0, 0);
     if (current != 0 && current != 1) {
         log("g_weaponKick has an unexpected initial value; suppression disabled");
@@ -669,26 +672,11 @@ void emit64(unsigned char*& cursor, unsigned long long value) {
 }
 
 bool readableRange(const void* address, size_t bytes) {
-    if (!address || !bytes) return false;
-    MEMORY_BASIC_INFORMATION memory{};
-    if (!VirtualQuery(address, &memory, sizeof(memory)) || memory.State != MEM_COMMIT) return false;
-    if ((memory.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0) return false;
-    const auto begin = reinterpret_cast<uintptr_t>(address);
-    const auto regionEnd = reinterpret_cast<uintptr_t>(memory.BaseAddress) + memory.RegionSize;
-    return begin <= regionEnd && bytes <= regionEnd - begin;
+    return kharvox::gameMemory::range(address, bytes);
 }
 
 bool writableRange(void* address, size_t bytes) {
-    if (!address || !bytes) return false;
-    MEMORY_BASIC_INFORMATION memory{};
-    if (!VirtualQuery(address, &memory, sizeof(memory)) || memory.State != MEM_COMMIT) return false;
-    if ((memory.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0) return false;
-    constexpr DWORD writable = PAGE_READWRITE | PAGE_WRITECOPY
-        | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
-    if ((memory.Protect & writable) == 0) return false;
-    const auto begin = reinterpret_cast<uintptr_t>(address);
-    const auto regionEnd = reinterpret_cast<uintptr_t>(memory.BaseAddress) + memory.RegionSize;
-    return begin <= regionEnd && bytes <= regionEnd - begin;
+    return kharvox::gameMemory::range(address, bytes, true);
 }
 
 struct WeaponIdentityMatch {
@@ -748,7 +736,8 @@ bool readableAsciiString(uintptr_t address, std::string& value) {
     const auto regionEnd = reinterpret_cast<uintptr_t>(memory.BaseAddress) + memory.RegionSize;
     const size_t available = static_cast<size_t>(regionEnd - address);
     const size_t limit = std::min<size_t>(available, 240);
-    const auto text = reinterpret_cast<const unsigned char*>(address);
+    std::array<unsigned char, 240> text{};
+    if (!kharvox::gameMemory::copy(reinterpret_cast<const void*>(address), text.data(), limit)) return false;
     for (size_t index = 0; index < limit; ++index) {
         const unsigned char character = text[index];
         if (!character) return value.size() >= 6;
@@ -844,9 +833,9 @@ bool installWeaponAmmoSnapshot(unsigned char* image) {
         0x48,0x8B,0x01,0x48,0x8B,0xDA,0x8B,0x91,0xD4,0x08,0x00,0x00,
         0xFF,0x90,0xF0,0x03,0x00,0x00
     };
-    if (std::memcmp(countTarget, countSignature, sizeof(countSignature))
-        || std::memcmp(itemTarget, itemSignature, sizeof(itemSignature))
-        || std::memcmp(totalTarget, totalSignature, sizeof(totalSignature))) {
+    if (kharvox::gameMemory::compareImage(countTarget, countSignature, sizeof(countSignature))
+        || kharvox::gameMemory::compareImage(itemTarget, itemSignature, sizeof(itemSignature))
+        || kharvox::gameMemory::compareImage(totalTarget, totalSignature, sizeof(totalSignature))) {
         log("native inventory/ammo signature mismatch; Shoulder Weapon keeps timeout-only fallback");
         return false;
     }
@@ -878,8 +867,10 @@ void scoreInlineWeaponStrings(const unsigned char* bytes, size_t byteCount,
 
 void scoreWeaponObject(uintptr_t object, size_t requestedBytes, bool followPointers,
                        WeaponIdentityMatch& bestMatch, std::string& bestText) {
-    if (!object || !readableRange(reinterpret_cast<void*>(object), requestedBytes)) return;
-    const auto bytes = reinterpret_cast<const unsigned char*>(object);
+    std::array<unsigned char, 0xD00> snapshot{};
+    if (requestedBytes > snapshot.size()
+        || !kharvox::gameMemory::copy(reinterpret_cast<const void*>(object), snapshot.data(), requestedBytes)) return;
+    const auto bytes = snapshot.data();
     scoreInlineWeaponStrings(bytes, requestedBytes, bestMatch, bestText);
     if (bestMatch.score >= 100) return;
 
@@ -927,8 +918,9 @@ bool asciiEqualsInsensitive(const std::string& value, const char* token) {
 
 bool weaponObjectDirectlyNames(void* weaponData, const char* declName) {
     constexpr size_t weaponDeclScanBytes = 0x2000;
-    if (!weaponData || !readableRange(weaponData, weaponDeclScanBytes)) return false;
-    const auto bytes = static_cast<const unsigned char*>(weaponData);
+    std::array<unsigned char, weaponDeclScanBytes> snapshot{};
+    if (!kharvox::gameMemory::copy(weaponData, snapshot.data(), snapshot.size())) return false;
+    const auto bytes = snapshot.data();
 
     for (size_t start = 0; start < weaponDeclScanBytes;) {
         while (start < weaponDeclScanBytes && (bytes[start] < 0x20 || bytes[start] > 0x7e)) ++start;
@@ -1171,7 +1163,7 @@ bool installActiveWeaponIdentityHook(unsigned char* image) {
         0x44,0x8B,0xCA,0x83,0xFA,0xFF,0x75,0x07,
         0x44,0x8B,0x89,0xD4,0x08,0x00,0x00
     };
-    if (std::memcmp(target, signature, sizeof(signature))) {
+    if (kharvox::gameMemory::compareImage(target, signature, sizeof(signature))) {
         log("RVA 0xF137B0 active weapon-data signature mismatch; two-hand identity stays UNKNOWN/einhändig");
         return false;
     }
@@ -1425,8 +1417,10 @@ unsigned scanJointArraysInObject(const unsigned char* bytes, size_t objectBytes,
         for (size_t pointerOffset = start; pointerOffset <= end; pointerOffset += 8) {
             uintptr_t pointer{};
             std::memcpy(&pointer, bytes + pointerOffset, sizeof(pointer));
-            if ((pointer & 0x7) != 0 || !readableRange(reinterpret_cast<void*>(pointer), size_t(count) * 48)) continue;
-            auto matrices = reinterpret_cast<const float*>(pointer);
+            std::array<float, 96 * 12> snapshot{};
+            if ((pointer & 0x7) != 0
+                || !kharvox::gameMemory::copy(reinterpret_cast<void*>(pointer), snapshot.data(), size_t(count) * 48)) continue;
+            const auto matrices = snapshot.data();
             float score = 0.0f;
             for (uint32_t joint = 0; joint < std::min<uint32_t>(count, 8); ++joint)
                 score += jointMatrixScore(matrices + joint * 12);
@@ -1461,8 +1455,10 @@ void dumpGenericJointMatrixCandidates(std::ofstream& out, const unsigned char* b
             uintptr_t pointer{};
             std::memcpy(&pointer, bytes + pointerOffset, sizeof(pointer));
             const size_t matrixBytes = size_t(count) * 48;
-            if ((pointer & 0xF) != 0 || !readableRange(reinterpret_cast<void*>(pointer), matrixBytes)) continue;
-            const auto matrices = reinterpret_cast<const float*>(pointer);
+            std::array<float, 256 * 12> snapshot{};
+            if ((pointer & 0xF) != 0
+                || !kharvox::gameMemory::copy(reinterpret_cast<void*>(pointer), snapshot.data(), matrixBytes)) continue;
+            const auto matrices = snapshot.data();
             const uint32_t tested = std::min<uint32_t>(count, 8);
             float score = 0.0f;
             for (uint32_t joint = 0; joint < tested; ++joint)
@@ -1510,8 +1506,10 @@ void dumpDirectJointMatrixRuns(std::ofstream& out, const unsigned char* bytes,
 
 void dumpEntityPointerGraph(std::ofstream& out, uintptr_t entity, const char* owner,
                             size_t directBytes = 0x200) {
-    if (!entity || !readableRange(reinterpret_cast<void*>(entity), directBytes)) return;
-    const auto bytes = reinterpret_cast<const unsigned char*>(entity);
+    std::array<unsigned char, 0x2000> snapshot{};
+    if (directBytes > snapshot.size()
+        || !kharvox::gameMemory::copy(reinterpret_cast<void*>(entity), snapshot.data(), directBytes)) return;
+    const auto bytes = snapshot.data();
     out << "POINTER_GRAPH " << owner << " entity=0x" << std::hex << entity << std::dec << '\n';
     dumpGenericJointMatrixCandidates(out, bytes, directBytes, owner, entity);
     dumpDirectJointMatrixRuns(out, bytes, directBytes, owner, entity);
@@ -1529,9 +1527,11 @@ void dumpEntityPointerGraph(std::ofstream& out, uintptr_t entity, const char* ow
         visited[visitedCount++] = pointer;
         out << "PTRLINK owner=" << owner << " offset=0x" << std::hex << offset
             << " target=0x" << pointer << std::dec << '\n';
-        dumpGenericJointMatrixCandidates(out, reinterpret_cast<const unsigned char*>(pointer),
+        std::array<unsigned char, 0x1000> referenced{};
+        if (!kharvox::gameMemory::copy(reinterpret_cast<void*>(pointer), referenced.data(), referenced.size())) continue;
+        dumpGenericJointMatrixCandidates(out, referenced.data(),
                                          0x1000, owner, pointer);
-        dumpDirectJointMatrixRuns(out, reinterpret_cast<const unsigned char*>(pointer),
+        dumpDirectJointMatrixRuns(out, referenced.data(),
                                   0x1000, owner, pointer);
     }
     out << "POINTER_GRAPH_END " << owner << " links=" << visitedCount << '\n';
@@ -1539,12 +1539,12 @@ void dumpEntityPointerGraph(std::ofstream& out, uintptr_t entity, const char* ow
 
 void dumpWeaponObjectFloatDeltas(std::ofstream& out, uintptr_t weaponObject,
                                  unsigned snapshot) {
-    if (!weaponObject ||
-        !readableRange(reinterpret_cast<void*>(weaponObject), weaponObjectSnapshotBytes)) {
+    std::array<unsigned char, weaponObjectSnapshotBytes> captured{};
+    if (!kharvox::gameMemory::copy(reinterpret_cast<void*>(weaponObject), captured.data(), captured.size())) {
         out << "WEAPON_OBJECT_SNAPSHOT unreadable\n";
         return;
     }
-    const auto bytes = reinterpret_cast<const unsigned char*>(weaponObject);
+    const auto bytes = captured.data();
     if (snapshot == 1 || !baselineWeaponObjectValid) {
         std::memcpy(baselineWeaponObjectBytes.data(), bytes, weaponObjectSnapshotBytes);
         baselineWeaponObjectAddress = weaponObject;
@@ -1590,11 +1590,12 @@ void scanHandsJointArrays(void* hands) {
     if (call != 1 && call % 120 != 0) return;
 
     constexpr size_t handsBytes = 0x10400;
-    if (!readableRange(hands, handsBytes)) {
+    std::vector<unsigned char> snapshot(handsBytes);
+    if (!kharvox::gameMemory::copy(hands, snapshot.data(), snapshot.size())) {
         if (call == 1) log("joint scan skipped: idHands range is not readable");
         return;
     }
-    const auto bytes = static_cast<const unsigned char*>(hands);
+    const auto bytes = snapshot.data();
     unsigned candidates = scanJointArraysInObject(bytes, handsBytes, "idHands",
                                                    reinterpret_cast<uintptr_t>(hands));
 
@@ -1611,7 +1612,9 @@ void scanHandsJointArrays(void* hands) {
         for (size_t index = 0; index < visitedCount; ++index) duplicate |= visited[index] == pointer;
         if (duplicate) continue;
         visited[visitedCount++] = pointer;
-        candidates += scanJointArraysInObject(reinterpret_cast<const unsigned char*>(pointer), 0x800,
+        std::array<unsigned char, 0x800> referenced{};
+        if (!kharvox::gameMemory::copy(reinterpret_cast<void*>(pointer), referenced.data(), referenced.size())) continue;
+        candidates += scanJointArraysInObject(referenced.data(), referenced.size(),
                                                "idHands-ref", pointer);
     }
     if (candidates) jointScanLogged.store(true, std::memory_order_release);
@@ -1705,8 +1708,9 @@ void dumpBoneSnapshot(void* hands) {
         << " depthHack=" << lastWeaponPresentDepthHack.load(std::memory_order_relaxed) << '\n';
 
     const auto dumpNativeEntityDepth = [&](const char* role, uintptr_t entity) {
-        const auto bytes = reinterpret_cast<const unsigned char*>(entity);
-        if (!entity || !readableRange(bytes, 0x154)) return;
+        std::array<unsigned char, 0x154> captured{};
+        if (!kharvox::gameMemory::copy(reinterpret_cast<void*>(entity), captured.data(), captured.size())) return;
+        const auto bytes = captured.data();
         float depth{};
         std::memcpy(&depth, bytes + 0x14C, sizeof(depth));
         out << "NATIVE_ENTITY_DEPTH role=" << role << " stored=" << depth
@@ -1754,8 +1758,8 @@ void dumpBoneSnapshot(void* hands) {
 
     const unsigned validBones = dumpModelBones("BONE", model, 96);
     const auto propEntity = lastWeaponPropEntity.load(std::memory_order_acquire);
-    const unsigned validPropBones = dumpModelBones(
-        "PROP_BONE", reinterpret_cast<void*>(propEntity), 128);
+    const unsigned validPropBones = 0;
+    out << "PROP_BONE native calls withheld: retained entity has no lifetime lease\n";
     dumpWeaponObjectFloatDeltas(
         out, lastWeaponRenderObject.load(std::memory_order_acquire), snapshot);
     dumpEntityPointerGraph(out, lastControllerRootEntity.load(std::memory_order_acquire), "ROOT", 0x1000);
@@ -1777,6 +1781,8 @@ void dumpBoneSnapshot(void* hands) {
 }
 
 void pollBoneSnapshot(void* hands) {
+    static std::mutex diagnosticMutex;
+    std::lock_guard lock(diagnosticMutex);
     const bool down = (GetAsyncKeyState(VK_F4) & 0x8000) != 0;
     if (down && !boneSnapshotKeyWasDown) dumpBoneSnapshot(hands);
     boneSnapshotKeyWasDown = down;
@@ -1790,15 +1796,16 @@ bool validateCollectibleClassifier(unsigned char* image) {
     constexpr uint64_t selectField = 0x400000878ULL;
     constexpr uint64_t flagsField = 0x700010374ULL;
     constexpr unsigned char getter[]{0x0f,0xb6,0x41,0x05,0xc1,0xe8,0x07,0xc3};
-    const bool supported = !std::memcmp(image + 0x31e3048, &webField, 8)
-        && !std::memcmp(image + 0x3206230, &selectField, 8)
-        && !std::memcmp(image + 0x31e4638, &flagsField, 8)
-        && !std::memcmp(image + 0x1508030, getter, sizeof(getter))
-        && !std::strcmp(reinterpret_cast<const char*>(image + 0x27aa228),
-            "HANDS_CUSTOM_ANIM_COLLECTABLE_FIRST")
-        && *reinterpret_cast<const uint64_t*>(image + 0x3519988) == 6
-        && *reinterpret_cast<const uint64_t*>(image + 0x3519998) == 7
-        && *reinterpret_cast<const uint64_t*>(image + 0x35199a8) == 8;
+    constexpr uint64_t first = 6, standard = 7, fistBump = 8;
+    constexpr char name[] = "HANDS_CUSTOM_ANIM_COLLECTABLE_FIRST";
+    const bool supported = !kharvox::gameMemory::compareImage(image + 0x31e3048, &webField, 8)
+        && !kharvox::gameMemory::compareImage(image + 0x3206230, &selectField, 8)
+        && !kharvox::gameMemory::compareImage(image + 0x31e4638, &flagsField, 8)
+        && !kharvox::gameMemory::compareImage(image + 0x1508030, getter, sizeof(getter))
+        && !kharvox::gameMemory::compareImage(image + 0x27aa228, name, sizeof(name))
+        && !kharvox::gameMemory::compareImage(image + 0x3519988, &first, sizeof(first))
+        && !kharvox::gameMemory::compareImage(image + 0x3519998, &standard, sizeof(standard))
+        && !kharvox::gameMemory::compareImage(image + 0x35199a8, &fistBump, sizeof(fistBump));
     collectibleClassifierSupported.store(supported, std::memory_order_release);
     log(supported ? "[COLLECTIBLE-QUAD] native animation classifier validated (first/standard/fist bump)"
         : "[COLLECTIBLE-QUAD] native metadata mismatch; classifier disabled");
@@ -1868,7 +1875,7 @@ bool installHandsResourceResolverNullGuard(unsigned char* image) {
         0x48,0x89,0x6C,0x24,0x10,0x48,0x89,0x74,0x24,0x18,
         0x57,0x41,0x56,0x41,0x57,0x48,0x83,0xEC,0x20
     };
-    if (std::memcmp(target, signature, sizeof(signature))) {
+    if (kharvox::gameMemory::compareImage(target, signature, sizeof(signature))) {
         log("RVA 0x16E18D0 idHands resource signature mismatch; restart null guard disabled");
         return false;
     }
@@ -1910,7 +1917,7 @@ bool installUpdateHandsTransformHook(unsigned char* image) {
         0x48,0x8B,0xC4,0x48,0x89,0x58,0x18,0x55,0x56,0x57,
         0x48,0x8D,0xA8,0x98,0xFD,0xFF,0xFF
     };
-    if (std::memcmp(target, signature, sizeof(signature))) {
+    if (kharvox::gameMemory::compareImage(target, signature, sizeof(signature))) {
         log("RVA 0xD7D5D0 idHands update signature mismatch; joint scanner disabled");
         return false;
     }
@@ -1928,7 +1935,7 @@ bool installUpdateHandsTransformHook(unsigned char* image) {
     getJointTransform = reinterpret_cast<GetJointTransformFn>(image + 0x15EE6C0);
     // Signature checked against the game's named-locator entry, not a guessed vtable slot.
     constexpr unsigned char namedJointSignature[]{0x48,0x89,0x5C,0x24,0x10,0x48,0x89,0x74,0x24,0x18,0x57,0x48,0x83,0xEC,0x60};
-    if(!std::memcmp(image+0x15EFB60,namedJointSignature,sizeof(namedJointSignature)))
+    if(!kharvox::gameMemory::compareImage(image+0x15EFB60,namedJointSignature,sizeof(namedJointSignature)))
         getNamedJointTransform=reinterpret_cast<GetNamedJointTransformFn>(image+0x15EFB60);
     else log("[LASER] named muzzle locator signature mismatch; affected lasers withheld");
     // 0x15EFEC0 clears the surface visibility bit (BTR). 0x15F0C40 is
@@ -2012,7 +2019,7 @@ bool installWeaponRenderUpdateProbe(unsigned char* image) {
         0x48,0x8B,0xC4,0x48,0x89,0x58,0x08,0x48,0x89,0x68,0x10,
         0x48,0x89,0x70,0x18
     };
-    if (std::memcmp(target, signature, sizeof(signature))) {
+    if (kharvox::gameMemory::compareImage(target, signature, sizeof(signature))) {
         log("RVA 0xF275A0 weapon-render signature mismatch; child-model probe disabled");
         return false;
     }
@@ -2065,7 +2072,7 @@ bool installHandsFovScaleHook(unsigned char* image) {
         0x40, 0x53, 0x48, 0x83, 0xEC, 0x60, 0x48, 0x8B, 0xD9,
         0x48, 0x8B, 0x89, 0xB0, 0x02, 0x00, 0x00
     };
-    if (std::memcmp(target, signature, sizeof(signature))) {
+    if (kharvox::gameMemory::compareImage(target, signature, sizeof(signature))) {
         log("RVA 0xD60760 hands-FOV signature mismatch; projection neutralizer disabled");
         return false;
     }
@@ -2504,7 +2511,13 @@ extern "C" void __fastcall setRenderEntityAxisHook(void* rawEntity, const float*
 }
 
 bool KharvoxWeaponInstallHook() {
+    static std::mutex installationMutex;
+    std::lock_guard installationLock(installationMutex);
+    if (!kharvox::gameMemory::supportedDoomImage()) return false;
     if (installed.load(std::memory_order_acquire)) return true;
+    static bool attempted{};
+    if (attempted) return false;
+    attempted = true;
     auto image = reinterpret_cast<unsigned char*>(GetModuleHandleW(nullptr));
     if (!image) return false;
     installWeaponAmmoSnapshot(image);
@@ -2525,7 +2538,7 @@ bool KharvoxWeaponInstallHook() {
         0x0F,0xB6,0x41,0x71,0x84,0x41,0x70,0x75,0x50,
         0x8B,0x02,0x89,0x81,0xD4,0x00,0x00,0x00
     };
-    if (std::memcmp(target, signature, sizeof(signature))) {
+    if (kharvox::gameMemory::compareImage(target, signature, sizeof(signature))) {
         log("RVA 0x3B5400 axis-copy signature mismatch; final transform hook disabled");
         if (weaponKickOverrideArmed) setWeaponKickSuppressed(false);
         if (hitReactionOverrideArmed) setHandsHitReactionsSuppressed(false);

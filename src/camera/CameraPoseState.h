@@ -16,6 +16,8 @@ struct PlayerPhysicsSnapshot {
     uintptr_t owner{};
     uint64_t present{},generation{};
     bool valid{};
+    uint32_t inhibitFlags{};
+    bool controlValid{},syncAttack{};
 };
 class CameraPoseState {
     std::mutex mutex_;
@@ -36,9 +38,16 @@ public:
         std::lock_guard lock(mutex_);
         return physics_;
     }
+    PlayerPhysicsSnapshot physics(uint64_t present){
+        std::lock_guard lock(mutex_);
+        if(!physics_.valid||!physics_.present||present<physics_.present
+            ||present-physics_.present>2)return {};
+        return physics_;
+    }
     bool publishPhysics(const PlayerPhysicsSnapshot& physics){
         std::lock_guard lock(mutex_);
-        if(physics.generation!=pose_.generation)return false;
+        if(physics.generation!=pose_.generation||!physics.valid||!physics.owner
+            ||physics.present<physics_.present)return false;
         physics_=physics;
         return true;
     }

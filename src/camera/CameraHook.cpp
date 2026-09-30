@@ -1,3 +1,5 @@
+#include "../common/GameMemory.h"
+#include "../common/GameSignature.h"
 #include "AerCameraPairCache.h"
 #include "../sfs/NativeSfs.h"
 #include "CyberdemonQuadPolicy.h"
@@ -35,16 +37,9 @@
 
 namespace {
 struct HookSample {
-    volatile uintptr_t context{};
-    volatile unsigned long long hits{};
-    volatile float yaw{};
-    volatile float pitch{};
-    volatile float positionX{};
-    volatile float positionY{};
-    volatile float positionZ{};
-    volatile float fovX{};
-    volatile float fovY{};
-    volatile uintptr_t returnAddress{};
+    alignas(8) volatile LONG64 hits{};
+    std::atomic<float> fovX{};
+    std::atomic<float> fovY{};
 };
 
 HookSample sample;
@@ -64,6 +59,7 @@ std::atomic<bool> headValid{};
 std::atomic<bool> worldCameraActive{};
 std::atomic<bool> animatedSequenceActive{};
 kharvox::CameraPoseState cameraPoses;
+std::mutex bodyCameraMutex;
 std::array<std::atomic<float>, 9> preCinematicGameplayAxis{};
 std::atomic<bool> preCinematicGameplayAxisValid{};
 std::atomic<uintptr_t> playerLedgeTransitionOwner{};
@@ -73,6 +69,7 @@ std::atomic<bool> playerControlClassifierSupported{};
 std::atomic<unsigned long long> cameraPresentSerial{};
 std::atomic<unsigned long long> levelTransitionGeneration{};
 std::array<std::atomic<float>, 3> hudRenderAnchorOrigin{};
+std::mutex hudRenderPoseMutex;
 std::array<std::atomic<float>, 9> hudRenderAnchorAxis{};
 std::atomic<unsigned long long> hudRenderPoseSequence{};
 std::atomic<unsigned long long> hudRenderPosePresent{};
@@ -239,22 +236,8 @@ void synchronizeAerAnimatedCameraPose(
 }
 
 unsigned char* findTextSignature(const unsigned char* signature, size_t bytes) {
-    auto image = reinterpret_cast<unsigned char*>(GetModuleHandleW(nullptr));
-    if (!image) return nullptr;
-    auto dos = reinterpret_cast<IMAGE_DOS_HEADER*>(image);
-    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return nullptr;
-    auto nt = reinterpret_cast<IMAGE_NT_HEADERS64*>(image + dos->e_lfanew);
-    if (nt->Signature != IMAGE_NT_SIGNATURE) return nullptr;
-    auto section = IMAGE_FIRST_SECTION(nt);
-    for (unsigned i = 0; i < nt->FileHeader.NumberOfSections; ++i, ++section) {
-        if (std::memcmp(section->Name, ".text", 5)) continue;
-        auto begin = image + section->VirtualAddress;
-        const size_t size = section->Misc.VirtualSize;
-        for (size_t offset = 0; offset + bytes <= size; ++offset) {
-            if (!std::memcmp(begin + offset, signature, bytes)) return begin + offset;
-        }
-    }
-    return nullptr;
+    return const_cast<unsigned char*>(kharvox::gameMemory::findTextSignature(
+        kharvox::gameMemory::mainImage(), signature, bytes));
 }
 
 void emit8(unsigned char*& p, unsigned char value) { *p++ = value; }
@@ -311,7 +294,7 @@ bool installPlayerFocusTraceHook(unsigned char* image) {
         0x0F,0x28,0x45,0x80
     };
     auto target = image + focusTraceRva;
-    if (std::memcmp(target, signature, sizeof(signature))) {
+    if (kharvox::gameMemory::compareImage(target, signature, sizeof(signature))) {
         log("[FOCUS] FocusTracker trace signature mismatch; HMD USE ray disabled");
         return false;
     }
@@ -409,7 +392,7 @@ bool installPlayerLedgeTraceAxisHook(unsigned char* image) {
         0x48,0x8B,0x01
     };
     auto target = image + ledgeAxisRva;
-    if (std::memcmp(target, signature, sizeof(signature))) {
+    if (kharvox::gameMemory::compareImage(target, signature, sizeof(signature))) {
         log("[LEDGE] player ledge trace-axis signature mismatch; HMD ledge direction disabled");
         return false;
     }
@@ -485,7 +468,7 @@ bool installPlayerLedgeStateCapture(unsigned char* image) {
         0x89,0xAE,0x58,0x52,0x00,0x00
     };
     auto target = image + stateCommitRva;
-    if (std::memcmp(target, signature, sizeof(signature))) {
+    if (kharvox::gameMemory::compareImage(target, signature, sizeof(signature))) {
         log("[CINEMATIC-CLASS] Ledge state signature mismatch; Jump/Ledge exception disabled");
         return false;
     }
@@ -555,9 +538,9 @@ bool validateSyncAttackClassifier(unsigned char* image) {
     constexpr unsigned char flagReadSignature[] = {
         0x80,0xB8,0xC9,0x3D,0x00,0x00,0x00,0x74,0x26
     };
-    const bool supported = !std::memcmp(
+    const bool supported = !kharvox::gameMemory::compareImage(
             image + startSyncAttackRva, startSignature, sizeof(startSignature))
-        && !std::memcmp(image + instigatorFlagReadRva,
+        && !kharvox::gameMemory::compareImage(image + instigatorFlagReadRva,
             flagReadSignature, sizeof(flagReadSignature));
     syncAttackClassifierSupported.store(supported, std::memory_order_release);
     log(supported
@@ -576,7 +559,7 @@ bool validatePlayerControlClassifier(unsigned char* image) {
     constexpr unsigned char reflectedFieldSignature[]{
         0x4C,0x4C,0x01,0x00, 0x04,0x00,0x00,0x00
     };
-    const bool supported = !std::memcmp(
+    const bool supported = !kharvox::gameMemory::compareImage(
         image + inhibitFlagsRecordRva + 0x18,
         reflectedFieldSignature, sizeof(reflectedFieldSignature));
     playerControlClassifierSupported.store(supported, std::memory_order_release);
@@ -615,14 +598,7 @@ std::atomic<PlayerViewAxisFn> originalPlayerViewAxis{};
 std::atomic<bool> playerViewAxisHookInstalled{};
 
 bool readableMemory(const void* address, size_t bytes) {
-    if (!address || !bytes) return false;
-    MEMORY_BASIC_INFORMATION info{};
-    if (!VirtualQuery(address, &info, sizeof(info)) || info.State != MEM_COMMIT) return false;
-    if ((info.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0) return false;
-    const auto begin = reinterpret_cast<uintptr_t>(address);
-    const auto end = begin + bytes;
-    const auto regionEnd = reinterpret_cast<uintptr_t>(info.BaseAddress) + info.RegionSize;
-    return end >= begin && end <= regionEnd;
+    return kharvox::gameMemory::range(address, bytes);
 }
 
 bool executableMemory(const void* address) {
@@ -638,15 +614,16 @@ bool executableMemory(const void* address) {
 #include "PhysicsOrigin.inc"
 
 void invalidateLevelReferences() {
+    std::scoped_lock poseLock(bodyCameraMutex, hudRenderPoseMutex, bodyStanceMutex);
     bool hadPlayer{};
     {
-        std::lock_guard<std::mutex> stanceGuard(bodyStanceMutex);
         hadPlayer=cameraPoses.invalidate();
         stableBodyViewOffsetValid.store(false, std::memory_order_release);
         stableBodyViewOffsetOwner.store(0, std::memory_order_release);
     }
     playerLedgeTransitionOwner.store(0, std::memory_order_release);
     playerLedgeTransitionActive.store(false, std::memory_order_release);
+    hudRenderPoseValid.store(false, std::memory_order_release);
     preCinematicGameplayAxisValid.store(false, std::memory_order_release);
     if (hadPlayer) {
         const auto generation = levelTransitionGeneration.fetch_add(
@@ -656,20 +633,12 @@ void invalidateLevelReferences() {
     }
 }
 
-bool readLivePlayerPhysicsOrigin(float origin[3], uint64_t generation, uintptr_t* ownerOut) {
+bool readCapturedPlayerPhysicsOrigin(float origin[3], uint64_t generation, uintptr_t* ownerOut) {
     if (!origin || !worldCameraActive.load(std::memory_order_acquire)) return false;
-    const auto physicsPose=cameraPoses.physics();
+    const auto physicsPose=cameraPoses.physics(cameraPresentSerial.load(std::memory_order_acquire));
     if(!physicsPose.valid||physicsPose.generation!=generation)return false;
-    const auto present = cameraPresentSerial.load(std::memory_order_acquire);
-    const auto captured = physicsPose.present;
-    if (!captured || present < captured || present - captured > 2) return false;
     const uintptr_t owner = physicsPose.owner;
-    if (!owner || owner > UINTPTR_MAX - 0x14E58) return false;
-    auto physics = reinterpret_cast<unsigned char*>(owner + 0x14E58);
-    if (!readPhysicsOriginSafely(physics, origin)) return false;
-    const auto current=cameraPoses.physics();
-    if (!current.valid || current.owner!=owner
-        || current.generation!=physicsPose.generation) return false;
+    std::copy(physicsPose.origin.begin(), physicsPose.origin.end(), origin);
     if (ownerOut) *ownerOut = owner;
     return true;
 }
@@ -714,7 +683,9 @@ void applyResidualHeadOrientation(float axis[9],const RenderHeadPose& head) {
 }
 
 void publishHudCenterRenderPose(
-    const float anchorOrigin[3], const float anchorAxis[9]) {
+    const float anchorOrigin[3], const float anchorAxis[9], uint64_t generation) {
+    std::lock_guard lock(hudRenderPoseMutex);
+    if (generation != cameraPoses.read().generation) return;
     // One sequence-locked snapshot ties the HUD to the exact camera struct
     // consumed by this render pass. Reconstructing it later from live player
     // physics and tracking atomics mixes different update loops.
@@ -735,11 +706,11 @@ extern "C" const float* __fastcall getVRGameplayViewAxis(void* player) {
     auto original = originalPlayerViewAxis.load(std::memory_order_acquire);
     if (!original) return nullptr;
     const float* nativeAxis = original(player);
-    if (!nativeAxis || !readableMemory(nativeAxis, 9 * sizeof(float))
+    if (!nativeAxis
         || !headValid.load(std::memory_order_acquire)
         || !worldCameraActive.load(std::memory_order_acquire)
         || cutsceneActive.load(std::memory_order_acquire)
-        || reinterpret_cast<uintptr_t>(player) != cameraPoses.physics().owner
+        || reinterpret_cast<uintptr_t>(player) != cameraPoses.physics(cameraPresentSerial.load()).owner
         || KharvoxCameraBossSequenceActive())
         return nativeAxis;
 
@@ -753,7 +724,7 @@ extern "C" const float* __fastcall getVRGameplayViewAxis(void* player) {
     if (callerRva == 0xE3F8FC) return nativeAxis;
 
     thread_local std::array<float, 9> combinedAxis{};
-    std::memcpy(combinedAxis.data(), nativeAxis, sizeof(combinedAxis));
+    if (!kharvox::gameMemory::copy(nativeAxis, combinedAxis.data(), sizeof(combinedAxis))) return nativeAxis;
     applyResidualHeadOrientation(combinedAxis.data());
 
     return combinedAxis.data();
@@ -761,15 +732,21 @@ extern "C" const float* __fastcall getVRGameplayViewAxis(void* player) {
 
 bool installPlayerViewAxisAdapter(void* player) {
     if (!player) return false;
-    auto vtable = *reinterpret_cast<void***>(player);
+    static std::mutex installationMutex;
+    std::lock_guard lock(installationMutex);
+    void** vtable{};
+    if (!kharvox::gameMemory::copy(player, &vtable, sizeof(vtable))) return false;
     constexpr size_t viewAxisSlot = 0x368 / sizeof(void*);
-    if (!readableMemory(vtable, (viewAxisSlot + 1) * sizeof(void*))) return false;
+    if (reinterpret_cast<uintptr_t>(vtable) % alignof(void*)
+        || !kharvox::gameMemory::imageRange(vtable, (viewAxisSlot + 1) * sizeof(void*))) return false;
     auto slot = vtable + viewAxisSlot;
     const auto adapter = reinterpret_cast<void*>(getVRGameplayViewAxis);
-    if (*slot == adapter) return true;
+    void* current{};
+    if (!kharvox::gameMemory::copy(slot, &current, sizeof(current))) return false;
+    if (current == adapter) return true;
     if (playerViewAxisHookInstalled.load(std::memory_order_acquire)) return false;
-    auto original = reinterpret_cast<PlayerViewAxisFn>(*slot);
-    if (!executableMemory(reinterpret_cast<const void*>(original))) return false;
+    auto original = reinterpret_cast<PlayerViewAxisFn>(current);
+    if (!kharvox::gameMemory::imageRange(current, 1) || !executableMemory(current)) return false;
     originalPlayerViewAxis.store(original, std::memory_order_release);
 
     DWORD oldProtect{};
@@ -778,10 +755,15 @@ bool installPlayerViewAxisAdapter(void* player) {
         log("[VIEW] idPlayer ViewAxis vtable protection failed");
         return false;
     }
-    InterlockedExchangePointer(reinterpret_cast<void* volatile*>(slot), adapter);
-    FlushInstructionCache(GetCurrentProcess(), slot, sizeof(void*));
+    const bool replaced = InterlockedCompareExchangePointer(
+        reinterpret_cast<void* volatile*>(slot), adapter, current) == current;
     DWORD ignored{};
-    VirtualProtect(slot, sizeof(void*), oldProtect, &ignored);
+    if (!VirtualProtect(slot, sizeof(void*), oldProtect, &ignored))
+        log("[VIEW] idPlayer ViewAxis vtable protection restore failed");
+    if (!replaced) {
+        originalPlayerViewAxis.store(nullptr, std::memory_order_release);
+        return false;
+    }
     playerViewAxisHookInstalled.store(true, std::memory_order_release);
     log("[VIEW] idPlayer gameplay ViewAxis adapter installed at vtable slot 0x368");
     return true;
@@ -801,6 +783,13 @@ extern "C" const float* __fastcall capturePlayerPhysicsOrigin(void* player) {
     if (readPhysicsOriginSafely(physics, physicsPose.origin.data())) {
         physicsPose.owner=reinterpret_cast<uintptr_t>(player);
         physicsPose.valid=true;
+        physicsPose.controlValid=playerControlClassifierSupported.load(std::memory_order_acquire)
+            && kharvox::gameMemory::copy(static_cast<unsigned char*>(player)+0x14C4C,
+                &physicsPose.inhibitFlags,sizeof(physicsPose.inhibitFlags));
+        unsigned char sync{};
+        physicsPose.syncAttack=syncAttackClassifierSupported.load(std::memory_order_acquire)
+            && kharvox::gameMemory::copy(static_cast<unsigned char*>(player)+0x3DC9,&sync,sizeof(sync))
+            && sync!=0;
         cameraPoses.publishPhysics(physicsPose);
     }
     KharvoxWeaponCaptureAmmoSnapshot(player);
@@ -816,7 +805,7 @@ bool installPlayerPhysicsOriginCapture(unsigned char* image) {
         0xFF,0x90,0x70,0x03,0x00,0x00,
         0x48,0x8B,0xCB
     };
-    if (std::memcmp(target, signature, sizeof(signature))) {
+    if (kharvox::gameMemory::compareImage(target, signature, sizeof(signature))) {
         log("player physics-origin capture signature mismatch; stable weapon anchor disabled");
         return false;
     }
@@ -937,7 +926,7 @@ bool installNativeShaderArenaGuard(unsigned char* image) {
         0x40,0x53,0x48,0x83,0xEC,0x20,0x48,0x89,0x11,0x48,
         0x8B,0xD9,0x4C,0x8B,0x9A,0x98,0x00,0x00,0x00
     };
-    if (std::memcmp(target, signature, sizeof(signature))) {
+    if (kharvox::gameMemory::compareImage(target, signature, sizeof(signature))) {
         log("[Stereo] Vulkan shader parse-context signature mismatch; native stereo disabled");
         return false;
     }
@@ -1001,7 +990,7 @@ bool installNativeVulkanBackendGuard(unsigned char* image) {
         0x40,0x56,0x57,0x41,0x56,0x48,0x83,0xEC,0x40,
         0x48,0xC7,0x44,0x24,0x30,0xFE,0xFF,0xFF,0xFF
     };
-    if (std::memcmp(target, signature, sizeof(signature))) {
+    if (kharvox::gameMemory::compareImage(target, signature, sizeof(signature))) {
         log("[Stereo] Vulkan backend-resize signature mismatch; native stereo disabled");
         return false;
     }
@@ -1089,7 +1078,7 @@ bool installNativeVulkanBackendOwnerGuard(unsigned char* image) {
         0x48,0x89,0x5C,0x24,0x08,0x48,0x89,0x74,0x24,0x10,
         0x57,0x48,0x83,0xEC,0x30,0x48,0x8B,0xF9
     };
-    if (std::memcmp(target, signature, sizeof(signature))) {
+    if (kharvox::gameMemory::compareImage(target, signature, sizeof(signature))) {
         log("[Stereo] Vulkan backend-owner signature mismatch; native stereo disabled");
         return false;
     }
@@ -1395,7 +1384,7 @@ bool installSameFrameProofHook() {
     auto image = reinterpret_cast<unsigned char*>(GetModuleHandleW(nullptr));
     auto target = image ? image + 0xDC80D0 : nullptr;
     constexpr unsigned char prefix[] = {0x48,0x89,0x5C,0x24,0x10,0x56,0x48,0x83,0xEC,0x30,0x48,0x8B,0x01,0x49,0x8B,0xF0};
-    if (!target || std::memcmp(target, prefix, sizeof(prefix))) {
+    if (!target || kharvox::gameMemory::compareImage(target, prefix, sizeof(prefix))) {
         log("[Stereo] DC80D0 render-front-end signature mismatch; proof hook not installed");
         return false;
     }
@@ -1498,6 +1487,7 @@ bool installCutsceneFovHook() {
 extern "C" void __fastcall patchCamera(void* rawContext, void* rawReturnAddress) {
     if (!rawContext) return;
     const auto previousBody=cameraPoses.read();
+    const auto captureGeneration=previousBody.generation;
     auto camera = static_cast<float*>(rawContext);
     const uintptr_t context = reinterpret_cast<uintptr_t>(rawContext);
     const uintptr_t returnAddress = reinterpret_cast<uintptr_t>(rawReturnAddress);
@@ -1509,9 +1499,6 @@ extern "C" void __fastcall patchCamera(void* rawContext, void* rawReturnAddress)
     if(callerRva==0xA30CFF&&KharvoxCameraBossSequenceActive()){
         cutsceneActive.store(true,std::memory_order_release);
         InterlockedExchange(&immersiveCinematicFovHookActive,0);
-        sample.context=context;sample.returnAddress=returnAddress;
-        sample.positionX=unmodifiedPosition[0];sample.positionY=unmodifiedPosition[1];
-        sample.positionZ=unmodifiedPosition[2];
         sample.fovX=*reinterpret_cast<float*>(unmodifiedCameraBytes+0x70);
         sample.fovY=*reinterpret_cast<float*>(unmodifiedCameraBytes+0x74);
         InterlockedIncrement64(reinterpret_cast<volatile LONG64*>(&sample.hits));
@@ -1528,6 +1515,8 @@ extern "C" void __fastcall patchCamera(void* rawContext, void* rawReturnAddress)
         // translation remains disabled so the animation still owns position.
         const bool wasCutscene = cutsceneActive.exchange(true, std::memory_order_acq_rel);
         if (!wasCutscene && previousBody.valid) {
+            std::lock_guard lock(bodyCameraMutex);
+            if(captureGeneration!=cameraPoses.read().generation)return;
             preCinematicGameplayAxisValid.store(false, std::memory_order_release);
             float entryBasis[9]{};
             float levelEntryBasis[9]{};
@@ -1550,9 +1539,12 @@ extern "C" void __fastcall patchCamera(void* rawContext, void* rawReturnAddress)
             && headValid.load(std::memory_order_acquire);
         if (immersiveHmdRotation) {
             float hmdBasis[9]{};
-            for (int index = 0; index < 9; ++index)
-                hmdBasis[index] = preCinematicGameplayAxis[index].load(
-                    std::memory_order_relaxed);
+            {
+                std::lock_guard lock(bodyCameraMutex);
+                if (captureGeneration != cameraPoses.read().generation) return;
+                for (int index = 0; index < 9; ++index)
+                    hmdBasis[index] = preCinematicGameplayAxis[index].load(std::memory_order_relaxed);
+            }
             applyResidualHeadOrientation(hmdBasis);
             std::memcpy(unmodifiedBasis, hmdBasis, sizeof(hmdBasis));
             if (!wasCutscene)
@@ -1608,15 +1600,8 @@ extern "C" void __fastcall patchCamera(void* rawContext, void* rawReturnAddress)
                     ?"[NATIVE-CINEMATIC] animated center camera projection active; eye separation is applied by the two Native scene roots"
                     :"[AER-CINEMATIC] cinematic camera now receives per-eye IPD/projection; native animation retained");
         }
-        sample.context = context;
-        sample.yaw = camera[0];
-        sample.pitch = camera[1];
-        sample.positionX = unmodifiedPosition[0];
-        sample.positionY = unmodifiedPosition[1];
-        sample.positionZ = unmodifiedPosition[2];
         sample.fovX = nativeFovX;
         sample.fovY = nativeFovY;
-        sample.returnAddress = returnAddress;
         const auto cinematicHead=renderHeadPose();
         if(!kharvox::native::requested()&&stereoEnabled&&tracedEyeOffset!=0
             &&aerRenderPairEnabled.load(std::memory_order_acquire)){
@@ -1683,6 +1668,7 @@ extern "C" void __fastcall patchCamera(void* rawContext, void* rawReturnAddress)
             fallbackBasis[index] = previousBody.axis[index];
         fallback = fallbackBasis;
     } else if (preCinematicGameplayAxisValid.load(std::memory_order_acquire)) {
+        std::lock_guard lock(bodyCameraMutex);
         for (int index = 0; index < 9; ++index)
             fallbackBasis[index] = preCinematicGameplayAxis[index].load(std::memory_order_relaxed);
         fallback = fallbackBasis;
@@ -1706,7 +1692,7 @@ extern "C" void __fastcall patchCamera(void* rawContext, void* rawReturnAddress)
         KharvoxCameraPlayerWeaponControlActive(),KharvoxCameraBossSequenceActive());
     {
     std::lock_guard<std::mutex> stanceGuard(bodyStanceMutex);
-    const auto physicsPose=cameraPoses.physics();
+    const auto physicsPose=cameraPoses.physics(cameraPresentSerial.load());
     const bool existingBodyAnchor=stableBodyViewOffsetValid.load(std::memory_order_acquire)
         &&stableBodyViewOffsetOwner.load(std::memory_order_relaxed)
             ==physicsPose.owner;
@@ -1851,7 +1837,7 @@ extern "C" void __fastcall patchCamera(void* rawContext, void* rawReturnAddress)
     std::memcpy(hudAnchorOrigin, renderPosition, sizeof(hudAnchorOrigin));
     std::memcpy(hudAnchorAxis, basis, sizeof(hudAnchorAxis));
     if (gameplayCamera) {
-        publishHudCenterRenderPose(hudAnchorOrigin, hudAnchorAxis);
+        publishHudCenterRenderPose(hudAnchorOrigin, hudAnchorAxis, captureGeneration);
         // Bind the arm HUD to this rendered body, before HMD translation.
         // Live physics can already be on a different tick during locomotion.
         KharvoxHudCaptureOffhandRenderFrame(sourceViewBodyOrigin,bodyBasis);
@@ -1887,16 +1873,9 @@ extern "C" void __fastcall patchCamera(void* rawContext, void* rawReturnAddress)
         *reinterpret_cast<float*>(bytes + 0x70) = stereoFovX.load(std::memory_order_relaxed);
         *reinterpret_cast<float*>(bytes + 0x74) = stereoFovY.load(std::memory_order_relaxed);
     }
-    sample.context = context;
-    sample.yaw = camera[0];
-    sample.pitch = camera[1];
     auto position = reinterpret_cast<float*>(reinterpret_cast<unsigned char*>(rawContext) + 0xC0);
-    sample.positionX = position[0];
-    sample.positionY = position[1];
-    sample.positionZ = position[2];
     sample.fovX = sourceFovX;
     sample.fovY = sourceFovY;
-    sample.returnAddress = returnAddress;
     // SFS produces both eyes from this centered CPU view. Its weapon still
     // needs the same source-bound body/controller snapshot as AER.
     const bool centeredSfsSource=kharvox::sfs::vrEnabled();
@@ -2053,8 +2032,12 @@ void KharvoxCameraSetImmersiveCinematicFreelook(bool requested) {
 }
 
 bool KharvoxCameraInstallDiagnosticHook() {
+    static std::mutex installationMutex;
+    std::lock_guard installationLock(installationMutex);
+    if (!kharvox::gameMemory::supportedDoomImage()) return false;
     static bool attempted = false;
-    if (attempted) return sample.hits != 0;
+    static bool hookInstalled = false;
+    if (attempted) return hookInstalled;
     attempted = true;
     KharvoxWeaponInstallHook();
     KharvoxHudInstallHook();
@@ -2124,6 +2107,7 @@ bool KharvoxCameraInstallDiagnosticHook() {
         installNativeSameFrameStereo();
         installSameFrameProofHook();
     }
+    hookInstalled = true;
     return true;
 }
 
@@ -2131,9 +2115,7 @@ void KharvoxCameraPollDiagnostic() {
     // Runs for active VR presentation, independently of Extended Logging and
     // runtime/backend. Keep engine-side shake/kick rotations out of VR views.
     const auto image=reinterpret_cast<unsigned char*>(GetModuleHandleW(nullptr));
-    const auto dos=reinterpret_cast<const IMAGE_DOS_HEADER*>(image);
-    const auto nt=reinterpret_cast<const IMAGE_NT_HEADERS64*>(image+dos->e_lfanew);
-    const auto viewEffects=kharvox::enforceViewEffects(image,nt->OptionalHeader.SizeOfImage);
+    const auto viewEffects=kharvox::enforceViewEffects(image,kharvox::gameMemory::mainImage().size);
     static bool viewEffectsLogged=false;
     if(!viewEffectsLogged||viewEffects==1||viewEffects==2||viewEffects==3){
         viewEffectsLogged=true;
@@ -2155,7 +2137,7 @@ void KharvoxCameraPollDiagnostic() {
     if (positionDirection == 1 && InterlockedCompareExchange(&manualPositionApplied, 2, 1) == 1)
         log("F10 DOOMPatchCamera local-X position +12 units applied");
 
-    const auto hits = sample.hits;
+    const auto hits = InterlockedCompareExchange64(&sample.hits, 0, 0);
     static unsigned long long previousHits{};
     static unsigned stableFrames{}, missingFrames{};
     const bool hitThisFrame = hits != previousHits;
@@ -2244,27 +2226,7 @@ bool KharvoxCameraNativeTwoViewActive() {
 bool KharvoxCameraCutsceneActive() { return cutsceneActive.load(std::memory_order_acquire); }
 
 bool KharvoxCameraSyncAttackActive() {
-    // idPlayer+0x3DC9 is the exact flag DOOM's native usability path checks
-    // before reporting that the local activator is instigating a sync attack.
-    // Campaign Glory Kills hold it for their native sync-attack lifetime.
-    constexpr uintptr_t syncAttackInstigatorOffset = 0x3DC9;
-    const uintptr_t owner = cameraPoses.physics().owner;
-    if (!syncAttackClassifierSupported.load(std::memory_order_acquire)
-        || !owner || owner > UINTPTR_MAX - syncAttackInstigatorOffset - 1
-        || !readableMemory(reinterpret_cast<const void*>(owner),
-            syncAttackInstigatorOffset + 1))
-        return false;
-#if defined(_MSC_VER)
-    __try {
-        return *reinterpret_cast<const unsigned char*>(
-            owner + syncAttackInstigatorOffset) != 0;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
-#else
-    return *reinterpret_cast<const unsigned char*>(
-        owner + syncAttackInstigatorOffset) != 0;
-#endif
+    return cameraPoses.physics(cameraPresentSerial.load()).syncAttack;
 }
 
 namespace {
@@ -2453,33 +2415,15 @@ bool KharvoxCameraBossSequenceActive(){
 }
 
 bool KharvoxCameraLedgeTransitionActive() {
-    const uintptr_t owner = cameraPoses.physics().owner;
+    const uintptr_t owner = cameraPoses.physics(cameraPresentSerial.load()).owner;
     return owner && playerLedgeTransitionActive.load(std::memory_order_acquire)
         && playerLedgeTransitionOwner.load(std::memory_order_acquire) == owner;
 }
 
 bool KharvoxCameraPlayerWeaponControlActive() {
-    constexpr uintptr_t inhibitFlagsOffset = 0x14C4C;
-    const auto physics=cameraPoses.physics();
-    const uintptr_t owner = physics.owner;
-    if (!playerControlClassifierSupported.load(std::memory_order_acquire)
-        || !worldCameraActive.load(std::memory_order_acquire)
-        || !physics.valid
-        || !owner || owner > UINTPTR_MAX - inhibitFlagsOffset - sizeof(uint32_t))
-        return false;
-
-    const auto flagsAddress = reinterpret_cast<const uint32_t*>(
-        owner + inhibitFlagsOffset);
-    if (!readableMemory(flagsAddress, sizeof(*flagsAddress))) return false;
-#if defined(_MSC_VER)
-    __try {
-        return kharvox::playerWeaponControlAvailable(*flagsAddress);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
-#else
-    return kharvox::playerWeaponControlAvailable(*flagsAddress);
-#endif
+    const auto captured=cameraPoses.physics(cameraPresentSerial.load());
+    return worldCameraActive.load(std::memory_order_acquire) && captured.valid
+        && captured.controlValid && kharvox::playerWeaponControlAvailable(captured.inhibitFlags);
 }
 
 bool KharvoxCameraGetBodyPose(float origin[3], float axis[9]) {
@@ -2490,7 +2434,7 @@ bool KharvoxCameraGetBodyPose(float origin[3], float axis[9]) {
         axis[index]=bodyPose.axis[index];
     uintptr_t liveOwner{};
     float livePhysicsOrigin[3]{};
-    if (bodyPose.anchorOwner && readLivePlayerPhysicsOrigin(
+    if (bodyPose.anchorOwner && readCapturedPlayerPhysicsOrigin(
             livePhysicsOrigin, bodyPose.generation, &liveOwner)
         && liveOwner == bodyPose.anchorOwner) {
         const auto& viewOffsetLocal=bodyPose.viewOffset;
@@ -2531,6 +2475,7 @@ bool KharvoxCameraGetHeadRenderPose(float origin[3], float axis[9]) {
 }
 
 bool KharvoxCameraGetHudCenterRenderPose(float origin[3], float axis[9]) {
+    std::lock_guard lock(hudRenderPoseMutex);
     if (!origin || !axis
         || !hudRenderPoseValid.load(std::memory_order_acquire)) return false;
 
@@ -2589,12 +2534,8 @@ unsigned long long KharvoxCameraLevelTransitionGeneration() {
 }
 
 bool KharvoxCameraGetPlayerPhysicsOrigin(float origin[3]) {
-    if (!origin) return false;
-    const auto physics=cameraPoses.physics();
-    if (!physics.valid) return false;
-    for (int index = 0; index < 3; ++index)
-        origin[index] = physics.origin[index];
-    return true;
+    const auto generation=cameraPoses.read().generation;
+    return readCapturedPlayerPhysicsOrigin(origin,generation,nullptr);
 }
 
 void KharvoxCameraSetStereoEye(float localXUnits, float fovXDegrees, float fovYDegrees, float opticalCenterYawDegrees, float opticalCenterPitchDegrees, bool enabled) {

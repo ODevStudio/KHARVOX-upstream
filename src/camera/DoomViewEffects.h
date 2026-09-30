@@ -1,4 +1,5 @@
 #pragma once
+#include "../common/GameMemory.h"
 #include <windows.h>
 #include <cstddef>
 #include <cstring>
@@ -10,10 +11,13 @@ inline constexpr size_t viewShakesValueRva=0x5bcffd0;
 inline constexpr size_t viewKicksValueRva=0x5bd0110;
 inline bool viewEffectsLayoutMatches(const unsigned char* image,size_t size) {
     constexpr unsigned char guard[]{0x44,0x39,0x25,0xbd,0x3c,0xd6,0x04,0x75,0x40};
+    const gameMemory::Image view{image, size};
     return image&&size>=viewKicksValueRva+sizeof(LONG)
-        &&!std::memcmp(image+0x22b7668,"view_skipShakes",sizeof("view_skipShakes"))
-        &&!std::memcmp(image+0x22b76e8,"view_skipKicks",sizeof("view_skipKicks"))
-        &&!std::memcmp(image+0xe6c30c,guard,sizeof(guard));
+        &&view.matches(0x22b7668,"view_skipShakes",sizeof("view_skipShakes"))
+        &&view.matches(0x22b76e8,"view_skipKicks",sizeof("view_skipKicks"))
+        &&view.matches(0xe6c30c,guard,sizeof(guard))
+        &&gameMemory::range(image+viewShakesValueRva,sizeof(LONG),true)
+        &&gameMemory::range(image+viewKicksValueRva,sizeof(LONG),true);
 }
 // Report the old values as a change mask. Already-correct values require no
 // write. Unexpected representations are rejected, never coerced blindly.

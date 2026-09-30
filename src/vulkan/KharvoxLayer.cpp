@@ -750,6 +750,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkNegotiateLoaderLayerInterfaceVersion(VkNegotiat
         logLine("Layer initialization failed: cannot retain hook module", true);
         return VK_ERROR_INITIALIZATION_FAILED;
     }
+    KharvoxXRInstallGameHooks();
     KharvoxCameraInstallDiagnosticHook();
     logLine("Layer loaded build=2026.09.04-native-frame-inputs-r139 runtimeDir=" + kharvox::runtimePathA("."), true);
     logLine("Loader negotiation successful"); return VK_SUCCESS;

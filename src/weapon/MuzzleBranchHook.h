@@ -1,4 +1,5 @@
 #pragma once
+#include "../common/GameMemory.h"
 #include <MinHook.h>
 #include <array>
 #include <atomic>
@@ -13,8 +14,9 @@ public:
     bool install(unsigned char* branch,const std::array<unsigned char,6>& expected){
         static_assert(sizeof(void*)==8);
         if(installed_.load(std::memory_order_acquire))return true;
+        std::array<unsigned char,6> actual{};
         if(!branch||expected[0]!=0x0f||expected[1]!=0x85
-            ||std::memcmp(branch,expected.data(),expected.size()))return false;
+            ||!gameMemory::copy(branch,actual.data(),actual.size())||actual!=expected)return false;
         const auto initialized=MH_Initialize();
         if(initialized!=MH_OK&&initialized!=MH_ERROR_ALREADY_INITIALIZED)return false;
         std::array<unsigned char,50> code{

@@ -1,4 +1,5 @@
 #include "kharvoxnative/pattern_scan.h"
+#include "../../../../common/GameMemory.h"
 #include "kharvoxnative/log.h"
 #include <Windows.h>
 #include <Psapi.h>
@@ -11,21 +12,18 @@ namespace {
 
 std::vector<int> parse(std::string_view pattern) {
     std::vector<int> bytes;
-    for (size_t i = 0; i < pattern.size();) {
-        while (i < pattern.size() && pattern[i] == ' ') ++i;
-        if (i >= pattern.size()) break;
-        if (pattern[i] == '?') {
-            bytes.push_back(-1);
-            ++i;
-            if (i < pattern.size() && pattern[i] == '?') ++i;
-            continue;
+    for (size_t start = pattern.find_first_not_of(" \t\r\n"); start != std::string_view::npos;) {
+        const auto end = pattern.find_first_of(" \t\r\n", start);
+        const auto token = pattern.substr(start, end == std::string_view::npos ? end : end - start);
+        if (token == "?" || token == "??") bytes.push_back(-1);
+        else {
+            unsigned value{};
+            if (token.size() != 2) return {};
+            const auto parsed = std::from_chars(token.data(), token.data() + token.size(), value, 16);
+            if (parsed.ec != std::errc() || parsed.ptr != token.data() + token.size()) return {};
+            bytes.push_back(static_cast<int>(value));
         }
-        if (i + 1 >= pattern.size()) break;
-        unsigned value{};
-        auto first = pattern.data() + i;
-        auto last = first + 2;
-        if (std::from_chars(first, last, value, 16).ec == std::errc()) bytes.push_back(static_cast<int>(value));
-        i += 2;
+        start = end == std::string_view::npos ? end : pattern.find_first_not_of(" \t\r\n", end);
     }
     return bytes;
 }
@@ -36,10 +34,12 @@ std::vector<int> parse(std::string_view pattern) {
 std::vector<std::uintptr_t> find_all(std::uint8_t* base, size_t size, const std::vector<int>& sig) {
     std::vector<std::uintptr_t> hits;
     if (sig.empty() || sig.size() > size) return hits;
+    std::vector<std::uint8_t> snapshot(size);
+    if (!kharvox::gameMemory::copy(base, snapshot.data(), snapshot.size())) return hits;
     for (size_t i = 0; i <= size - sig.size(); ++i) {
         bool ok = true;
         for (size_t j = 0; j < sig.size(); ++j) {
-            if (sig[j] >= 0 && base[i + j] != static_cast<std::uint8_t>(sig[j])) { ok = false; break; }
+            if (sig[j] >= 0 && snapshot[i + j] != static_cast<std::uint8_t>(sig[j])) { ok = false; break; }
         }
         if (ok) hits.push_back(reinterpret_cast<std::uintptr_t>(base + i));
     }
@@ -52,12 +52,9 @@ std::optional<ModuleBuildInfo> module_build_info(const wchar_t* module_name) {
     HMODULE mod = GetModuleHandleW(module_name);
     if (!mod) return std::nullopt;
 
-    auto* base = reinterpret_cast<std::uint8_t*>(mod);
-    auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
-    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return std::nullopt;
-
-    auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
-    if (nt->Signature != IMAGE_NT_SIGNATURE) return std::nullopt;
+    IMAGE_NT_HEADERS64 headers{};
+    if (!kharvox::gameMemory::module(mod).headers(headers)) return std::nullopt;
+    const auto nt = &headers;
 
     ModuleBuildInfo info;
     info.timestamp = nt->FileHeader.TimeDateStamp;

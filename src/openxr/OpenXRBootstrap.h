@@ -1,4 +1,5 @@
 #pragma once
+void KharvoxXRInstallGameHooks();
 #include "GameImageLifetime.h"
 #include <vulkan/vulkan.h>
 #include <string>
