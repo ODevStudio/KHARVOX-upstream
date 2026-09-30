@@ -199,7 +199,8 @@ inline void queueControllerClick(ControllerClickState& state, std::uint64_t now)
 
 inline XInputHapticSignal mixControllerClick(
     const XInputHapticSignal& native, const ControllerClickState& click,
-    std::uint64_t now) {
+    std::uint64_t now, bool enabled = true) {
+    if (!enabled) return {};
     if (now >= click.untilMilliseconds) return native;
     if (native.active && native.amplitude >= 0.5f) return native;
     return {0.5f, 160.0f, true};

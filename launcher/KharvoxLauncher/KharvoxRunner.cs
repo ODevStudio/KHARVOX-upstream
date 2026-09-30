@@ -42,6 +42,7 @@ internal sealed class KharvoxLaunchOptions
     public bool DisableVrIntro { get; }
     public string HandCalibrationMode { get; }
     public bool EnableBhaptics { get; }
+    public bool ControllerVibration { get; }
     public bool UsePsvr2Toolkit { get; }
     public string BackWeapon { get; }
 
@@ -60,7 +61,8 @@ internal sealed class KharvoxLaunchOptions
         string handCalibrationMode,
         bool enableBhaptics,
         bool usePsvr2Toolkit,
-        string backWeapon, bool handsJump = false, bool disableAa = false, bool captureEyes = false, bool disableVrIntro = false)
+        string backWeapon, bool handsJump = false, bool disableAa = false, bool captureEyes = false, bool disableVrIntro = false,
+        bool controllerVibration = true)
     {
         ImmersiveMode = immersiveMode; CinematicFreelook = cinematicFreelook;
         OtherCinematicsInQuad = otherCinematicsInQuad;
@@ -98,6 +100,7 @@ internal sealed class KharvoxLaunchOptions
         // calibration takes exclusive keypad ownership for this launch.
         HudDebugging = hudDebugging && HandCalibrationMode == "off";
         EnableBhaptics = enableBhaptics;
+        ControllerVibration = controllerVibration;
         UsePsvr2Toolkit = usePsvr2Toolkit;
         BackWeapon = NormalizeBackWeapon(backWeapon);
     }
@@ -136,6 +139,7 @@ internal sealed class KharvoxLaunchOptions
         $"showHands={(ShowHands ? "enabled" : "disabled")} " +
         $"handCalibration={HandCalibrationMode} " +
         $"bHaptics={(EnableBhaptics ? "enabled" : "disabled")} " +
+        $"controllerVibration={(ControllerVibration ? "enabled" : "disabled")} " +
         $"psvr2Toolkit={(UsePsvr2Toolkit ? "enabled" : "disabled")}";
 }
 
@@ -501,6 +505,7 @@ internal static class KharvoxRunner
             psi.EnvironmentVariables["KHARVOX_CAPTURE_EYES"] = options.CaptureEyes ? "1" : "0";
             psi.EnvironmentVariables["KHARVOX_DISABLE_AA"] = options.DisableAa ? "1" : "0";
             psi.EnvironmentVariables["KHARVOX_HANDS_JUMP"] = options.HandsJump ? "1" : "0";
+            psi.EnvironmentVariables["KHARVOX_DISABLE_CONTROLLER_VIBRATION"] = options.ControllerVibration ? "0" : "1";
             psi.EnvironmentVariables["KHARVOX_PHYSICAL_GLORYKILL"] = options.PhysicalGlorykill ? "1" : "0";
             psi.EnvironmentVariables["KHARVOX_PHYSICAL_GLORYKILL_SPEED"] = Inv(options.PhysicalGlorykillSpeed);
             psi.EnvironmentVariables["KHARVOX_PHYSICAL_GLORYKILL_HANDS"] = options.PhysicalGlorykillHands;

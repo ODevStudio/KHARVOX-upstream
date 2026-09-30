@@ -170,6 +170,10 @@ With SFS, choose anti-aliasing in DOOM's graphics settings. KHARVOX does not for
 
 Every KHARVOX launch disables DOOM's native Motion Blur, automatic Glory Kill Motion Blur and Chromatic Aberration. These VR-safe overrides do not edit or replace the encrypted DOOM user profile or campaign saves.
 
+### Controller Vibration
+
+**Controller vibration** under **VR OPTIONS** enables or disables OpenXR controller rumble, weapon-fire fallback feedback and weapon-wheel clicks. It defaults to on, stays saved across launcher restarts and profile changes, and takes effect on the next game launch. bHaptics and PSVR2 adaptive triggers remain separate. The toggle does not change controller bindings.
+
 ### bHaptics
 
 bHaptics feedback requires compatible gear and the [bHaptics Player for Windows](https://www.bhaptics.com/support/downloads/?type=bhaptics_player). Pair and verify the devices in the Player before starting the game.
