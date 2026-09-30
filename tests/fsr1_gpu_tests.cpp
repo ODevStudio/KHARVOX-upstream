@@ -13,23 +13,52 @@ static void ok(VkResult value){check(value==VK_SUCCESS,"Vulkan operation failed"
 namespace kharvox::native {
 [[noreturn]] void fail(const char* reason){throw std::runtime_error(reason);}
 }
-static void handleCopySubmitResult(Fsr1Upscaler& fsr,VkResult submitResult){
+static bool copySubmitInvalidatedAerHistory{};
+static void handleCopySubmitResult(Fsr1Upscaler& fsr,VkResult submitResult,
+    bool owned=true,uint32_t imageIndex=1){
+    copySubmitInvalidatedAerHistory=false;
     struct Hands {void finishSceneIntegratedFrame(){}};
-    struct ImageState {bool owned()const{return false;}};
-    struct Hud {std::uintptr_t handle{};};
+    struct ImageState {bool acquired{};bool owned()const{return acquired;}};
+    struct Image {std::array<bool,2> initialized{true,true};};
+    struct Hud : Image {std::uintptr_t handle{};};
     struct State {
         Fsr1Upscaler& fsr1;
         bool freshHandsWorldValid{true};
         Hands handRenderer;
         ImageState hudImageState;
         Hud hudQuad;
+        std::array<ImageState,2> eyeImageStates{};
+        std::array<Image,2> eyes{};
     } s{fsr};
+    s.hudImageState.acquired=owned;
+    for(auto& image:s.eyeImageStates)image.acquired=owned;
+    const std::array<uint32_t,2> xi{imageIndex,imageIndex};
+    const uint32_t hudImageIndex=imageIndex;
     const bool freshAerHands=false,nativeFrameValid=false;
-    const auto releaseAcquiredEyeImages=[]{};
-    const auto releaseImageChecked=[](std::uintptr_t,ImageState&){};
+    const auto releaseAcquiredEyeImages=[&]{
+        for(int e=0;e<2;++e)if(owned&&xi[e]<s.eyes[e].initialized.size())
+            check(!s.eyes[e].initialized[xi[e]],"Eye layout not invalidated before release");
+    };
+    const auto releaseImageChecked=[&](std::uintptr_t,ImageState&){
+        if(hudImageIndex<s.hudQuad.initialized.size())
+            check(!s.hudQuad.initialized[hudImageIndex],"HUD layout not invalidated before release");
+    };
     const auto log=[](const std::string&){};
     const auto endEmptyFrame=[](const char*){};
+    const auto invalidateAlternatingStereoHistory=[](bool clearProgrammedViews){
+        check(clearProgrammedViews,"Copy submit recovery must clear programmed AER views");
+        copySubmitInvalidatedAerHistory=true;
+    };
+    const auto handle=[&]{
 #include "../src/openxr/XrCopySubmitFailure.inc"
+    };
+    handle();
+    for(uint32_t index=0;index<2;++index){
+        const bool expected=submitResult==VK_SUCCESS||!owned||index!=imageIndex;
+        for(const auto& eye:s.eyes)
+            check(eye.initialized[index]==expected,"Incorrect eye layout state after submit");
+        check(s.hudQuad.initialized[index]==expected,"Incorrect HUD layout state after submit");
+    }
 }
 static VkResult injectedSubmitResult{VK_SUCCESS};
 static unsigned rejectedSubmits{};
@@ -176,6 +205,8 @@ int main(){try{
         std::array<VkImage,2> source{};std::array<VkDeviceMemory,2> sourceMemory{};
         for(int e=0;e<2;++e){VkImageCreateInfo ci{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};ci.imageType=VK_IMAGE_TYPE_2D;ci.format=format;ci.extent={64,36,1};ci.mipLevels=ci.arrayLayers=1;ci.samples=VK_SAMPLE_COUNT_1_BIT;ci.tiling=VK_IMAGE_TILING_OPTIMAL;ci.usage=VK_IMAGE_USAGE_TRANSFER_SRC_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT;ok(vkCreateImage(device,&ci,nullptr,&source[e]));vkGetImageMemoryRequirements(device,source[e],&req);sourceMemory[e]=allocate(req,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);ok(vkBindImageMemory(device,source[e],sourceMemory[e],0));}
         Fsr1Upscaler fsr;check(fsr.initialize(physical,device,dispatch,format,{64,36},{width,height}),"FSR initialization failed");
+        handleCopySubmitResult(fsr,VK_ERROR_OUT_OF_HOST_MEMORY,false);
+        handleCopySubmitResult(fsr,VK_ERROR_OUT_OF_DEVICE_MEMORY,true,2);
         for(uint64_t frame=1;frame<=3;++frame){
             ok(vkResetCommandBuffer(cb,0));
             VkCommandBufferBeginInfo abandoned{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};ok(vkBeginCommandBuffer(cb,&abandoned));
@@ -195,6 +226,8 @@ int main(){try{
                 const auto result=dispatch.queueSubmit(queue,1,&rejected,VK_NULL_HANDLE);
                 check(result==injectedSubmitResult,"Copy submission did not return injected OOM");
                 handleCopySubmitResult(fsr,result);
+                check(copySubmitInvalidatedAerHistory,
+                    "Failed copy submission retained AER cache/source metadata");
                 dispatch.queueSubmit=savedSubmit;
             }
             dispatchCount=undefinedTransitions=0;
